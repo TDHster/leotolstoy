@@ -1,0 +1,34 @@
+[project]
+name = "leotolstoy-chat"
+version = "0.1.0"
+description = "Чат в стиле Л. Н. Толстого — RAG поверх его писем и дневников"
+requires-python = ">=3.11"
+dependencies = [
+    # Эмбеддинги (локально, ONNX — без torch)
+    "fastembed>=0.5,<0.9",
+    "numpy>=1.24,<3",
+    # Сервер
+    "fastapi>=0.110,<0.116",
+    "uvicorn[standard]>=0.27,<0.35",
+    "httpx>=0.27,<0.29",
+    "python-dotenv>=1.0,<2.0",
+    # rate limiting (защита от абьюза и брутфорса)
+    "slowapi>=0.1.9,<0.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    # DeprecationWarning из starlette (устаревший псевдоним anyio) — не наш код,
+    # чинится обновлением starlette. Глушим точечно, остальные warning видны.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]

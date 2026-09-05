@@ -1,0 +1,12 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+model_cache/
+# исходные данные не нужны на сервере — там работает только собранный index/
+data/
+# локальные артефакты
+.deploy
+deploy.sh
+.rsyncignore

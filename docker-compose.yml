@@ -1,0 +1,50 @@
+services:
+  tolstoy:
+    build: .
+    container_name: tolstoy-chat
+    restart: unless-stopped
+    # корректная обработка сигналов и reaping зомби-процессов (долгий аптайм)
+    init: true
+    # HTTPS на порту 8443 (если 80/443 на сервере заняты другим сервисом).
+    # Заход: https://<SERVER_IP>:8443  (браузер один раз спросит про
+    # самоподписанный сертификат — принять исключение).
+    ports:
+      - "8443:8000"
+    environment:
+      # включает TLS в контейнере; сертификаты монтируются ниже
+      TLS_CERT: /app/certs/cert.pem
+      TLS_KEY: /app/certs/key.pem
+    env_file:
+      - .env
+    volumes:
+      # индекс (собран на Mac, перенесён на сервер) — read-only
+      - ./index:/app/index:ro
+      # самоподписанный TLS-сертификат (сгенерирован scripts/gen_cert.sh) — read-only
+      - ./certs:/app/certs:ro
+      # кэш модели эмбеддингов: качается один раз, переживает пересборки
+      - model_cache:/app/model_cache
+    # придерживаем память на маленьком сервере (2 ГБ).
+    # mem_reservation — мягкий порог (планировщик Docker учитывает при нехватке),
+    # mem_limit — жёсткий потолок (при превышении OOM-kill → healthcheck+restart поднимут).
+    mem_reservation: 800m
+    mem_limit: 1500m
+    # ротация логов: максимум 3 файла по 10 МБ = не более 30 МБ на диске.
+    # Без этого Docker пишет JSON-лог бесконечно и забивает диск.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # проверка живости: если /health не отвечает — Docker пометит unhealthy
+    # и (с restart: unless-stopped) перезапустит зависший контейнер.
+    # curl в образе нет → проверяем через Python (он есть). TLS самоподписанный
+    # → отключаем проверку сертификата в urllib.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,ssl; ctx=ssl._create_unverified_context(); urllib.request.urlopen('https://localhost:8000/health',context=ctx,timeout=4)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  model_cache:
