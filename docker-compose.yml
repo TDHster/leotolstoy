@@ -41,7 +41,7 @@ services:
     # → отключаем проверку сертификата в urllib.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,ssl; ctx=ssl._create_unverified_context(); urllib.request.urlopen('https://localhost:8000/health',context=ctx,timeout=4)"]
-      interval: 60s
+      interval: 300s
       timeout: 5s
       retries: 3
       start_period: 40s
