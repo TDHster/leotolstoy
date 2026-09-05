@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Сборка индекса эмбеддингов (запускать на Mac: `make embeddings`).
+Сборка индекса эмбеддингов (запускать локально: `make embeddings`).
 
 1. читает все data/*.txt -> чанки (scripts/corpus.py)
 2. эмбеддит их e5-small через ONNX (scripts/embed.py)

@@ -2,7 +2,7 @@
 
 FROM python:3.12-slim
 
-# uv для установки зависимостей (тот же lock, что на Mac)
+# uv для установки зависимостей (тот же lock, что и локально)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \

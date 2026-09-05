@@ -23,7 +23,7 @@ class Retriever:
         if not os.path.exists(vec_path) or not os.path.exists(chunks_path):
             raise FileNotFoundError(
                 f"Индекс не найден в {index_dir}. "
-                f"Соберите его на Mac (make embeddings) и скопируйте index/ на сервер."
+                f"Соберите его локально (make embeddings) и скопируйте index/ на сервер."
             )
         # vectors уже L2-нормализованы при сборке
         self.vectors: np.ndarray = np.load(vec_path).astype(np.float32)

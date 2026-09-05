@@ -17,7 +17,7 @@ services:
     env_file:
       - .env
     volumes:
-      # индекс (собран на Mac, перенесён на сервер) — read-only
+      # индекс (собран локально, перенесён на сервер) — read-only
       - ./index:/app/index:ro
       # самоподписанный TLS-сертификат (сгенерирован scripts/gen_cert.sh) — read-only
       - ./certs:/app/certs:ro
