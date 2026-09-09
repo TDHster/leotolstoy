@@ -91,7 +91,7 @@ function addSources(list) {
   const items = list.map(s => `
     <li>
       <details>
-        <summary>${esc(s.source)} <span class="score">(${esc(s.score)})</span></summary>
+        <summary>${esc(s.source)} <span class="score" title="Косинус угла между запросом и фрагментом: 1 — совпадение по смыслу, меньше — дальше">(cos φ = ${esc(s.score)})</span></summary>
         <blockquote>${esc(s.text)}</blockquote>
       </details>
     </li>`).join('');
