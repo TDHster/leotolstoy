@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """
-Конвертер EPUB -> структурированный txt.
+Конвертер EPUB -> txt для 90-томного собрания.
 
-Обрабатывает тома собрания сочинений Толстого. На каждую запись пишет блок:
+Извлекает текст + базовые метаданные (номер тома, название, тип).
+Формат выхода:
 
-    ### META | vol=18 | type=письмо | year=1849 | num=4 | to=С. Н. Толстому | date=... | note=...
-    <текст записи, абзацы через пустую строку>
-
-Затем этот txt читает scripts/build_embeddings.py.
-
-Для томов 18-22 (письма/дневники) парсит структуру и метаданные.
-Для всех остальных томов извлекает весь текст целиком (тип "проза").
-
-Зависимостей нет — только стандартная библиотека.
+    ### META | vol=5 | title=Война и мир. Том 1 | type=проза
+    <текст, абзацы через пустую строку>
 """
 from __future__ import annotations
 
@@ -23,17 +17,9 @@ import sys
 import zipfile
 from dataclasses import dataclass, field
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "90 томов Толстого")
 DATA_DIR = os.path.abspath(DATA_DIR)
 
-# Тома с детальной структурой (письма/дневники)
-STRUCTURED_VOLUMES = {
-    18: "письмо",
-    19: "письмо",
-    20: "письмо",
-    21: "дневник",
-    22: "дневник",
-}
 
 # ---------------------------------------------------------------------------
 # Разбор HTML секции
@@ -84,15 +70,50 @@ _YEAR_RE = re.compile(r"^\d{4}$")
 _LETTER_RE = re.compile(r"^\*?\s*(\d+)\.\s*(.*?)\s*(?:<(.*?)>)?\s*$")
 
 
+def _extract_epub_metadata(zf: zipfile.ZipFile) -> tuple[str, str]:
+    """
+    Извлекает название тома и тип из EPUB метаданных.
+    Возвращает (title, type).
+    """
+    names = {n.lower(): n for n in zf.namelist()}
+
+    # Ищем content.opf или package.opf
+    opf_name = None
+    for low, real in names.items():
+        if low.endswith('.opf') and ('content' in low or 'package' in low):
+            opf_name = real
+            break
+
+    if not opf_name:
+        return "", ""
+
+    try:
+        opf_content = zf.read(opf_name).decode('utf-8', errors='replace')
+
+        # Извлекаем <dc:title>
+        title_m = re.search(r'<dc:title[^>]*>(.*?)</dc:title>', opf_content, re.S | re.I)
+        title = _clean_text(title_m.group(1)) if title_m else ""
+
+        # Определяем тип по ключевым словам в названии
+        title_lower = title.lower()
+        if 'письм' in title_lower or 'letter' in title_lower:
+            rtype = "письма"
+        elif 'дневник' in title_lower or 'diary' in title_lower:
+            rtype = "дневники"
+        else:
+            rtype = "проза"
+
+        return title, rtype
+    except:
+        return "", ""
+
+
 @dataclass
 class Record:
+    """Запись с базовыми метаданными."""
     vol: int
-    rtype: str
-    year: str
-    num: str = ""
-    to: str = ""
-    date: str = ""
-    note: str = ""
+    title: str = ""  # название тома из EPUB
+    rtype: str = ""  # тип: проза, письма, дневники
     paragraphs: list[str] = field(default_factory=list)
 
 
@@ -160,10 +181,13 @@ def parse_volume(epub_path: str, vol: int) -> list[Record]:
 
 
 def parse_prose_volume(epub_path: str, vol: int) -> list[Record]:
-    """Парсинг художественных томов: весь текст целиком без детальной структуры."""
+    """Парсинг любого тома: весь текст + базовые метаданные."""
     records: list[Record] = []
 
     with zipfile.ZipFile(epub_path) as zf:
+        # Извлекаем метаданные
+        title, rtype = _extract_epub_metadata(zf)
+
         names = {n.lower(): n for n in zf.namelist()}
 
         # Собираем все параграфы из всех HTML-файлов
@@ -186,9 +210,9 @@ def parse_prose_volume(epub_path: str, vol: int) -> list[Record]:
         if all_paragraphs:
             records.append(Record(
                 vol=vol,
-                rtype="проза",
-                year="",
-                paragraphs=all_paragraphs,
+                title=title,
+                rtype=rtype,
+                paragraphs=all_paragraphs
             ))
 
     return records
@@ -198,27 +222,20 @@ def parse_prose_volume(epub_path: str, vol: int) -> list[Record]:
 # Запись txt
 # ---------------------------------------------------------------------------
 
-def _meta_line(r: Record) -> str:
-    def esc(s: str) -> str:
-        return s.replace("|", "/").replace("\n", " ").strip()
-    parts = [
-        f"vol={r.vol}", f"type={r.rtype}", f"year={esc(r.year)}",
-    ]
-    if r.num:
-        parts.append(f"num={esc(r.num)}")
-    if r.to:
-        parts.append(f"to={esc(r.to)}")
-    if r.date:
-        parts.append(f"date={esc(r.date)}")
-    if r.note:
-        parts.append(f"note={esc(r.note)}")
-    return "### META | " + " | ".join(parts)
-
-
 def write_txt(records: list[Record], out_path: str) -> None:
+    """Записываем текст с метаданными."""
     with open(out_path, "w", encoding="utf-8") as f:
         for r in records:
-            f.write(_meta_line(r) + "\n")
+            # Формируем строку META
+            parts = [f"vol={r.vol}"]
+            if r.title:
+                # Экранируем | в названии
+                title_safe = r.title.replace("|", "/")
+                parts.append(f"title={title_safe}")
+            if r.rtype:
+                parts.append(f"type={r.rtype}")
+
+            f.write("### META | " + " | ".join(parts) + "\n")
             f.write("\n\n".join(r.paragraphs))
             f.write("\n\n")
 
@@ -230,7 +247,8 @@ def find_epubs() -> list[tuple[int, str]]:
         for fn in files:
             if not fn.lower().endswith(".epub"):
                 continue
-            m = re.search(r"Том\s*(\d+)", fn)
+            # Ищем паттерн: "Том" или "том" + цифры (включая Толстой_Том_01.epub)
+            m = re.search(r"[Тт]ом[_\s]*(\d+)", fn)
             if not m:
                 continue
             vol = int(m.group(1))
@@ -246,23 +264,32 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    # Выходные txt сохраняем в data/, а не в data/90 томов Толстого/
+    output_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+    output_dir = os.path.abspath(output_dir)
+
     total = 0
     for vol, path in epubs:
-        # Выбор парсера в зависимости от типа тома
-        if vol in STRUCTURED_VOLUMES:
-            rtype = STRUCTURED_VOLUMES[vol]
-            records = parse_volume(path, vol)
-        else:
-            rtype = "проза"
-            records = parse_prose_volume(path, vol)
+        # Парсим все тома одинаково — извлекаем текст + метаданные
+        records = parse_prose_volume(path, vol)
 
-        out_name = f"tom{vol}_{'pisma' if rtype == 'письмо' else 'dnevniki' if rtype == 'дневник' else 'proza'}.txt"
-        out_path = os.path.join(DATA_DIR, out_name)
+        # Упрощённые имена файлов: tom01.txt, tom02.txt, ...
+        out_name = f"tom{vol:02d}.txt"
+        out_path = os.path.join(output_dir, out_name)
         write_txt(records, out_path)
         total += len(records)
-        print(f"Том {vol:2d} ({rtype:8s}): {len(records):>5} записей -> data/{out_name}")
 
-    print(f"\nИтого: {total} записей.")
+        # Показываем что извлекли
+        info = []
+        if records and records[0].title:
+            info.append(f'"{records[0].title}"')
+        if records and records[0].rtype:
+            info.append(f"[{records[0].rtype}]")
+        info_str = " ".join(info) if info else ""
+
+        print(f"Том {vol:2d}: {len(records):>5} записей -> {out_name}  {info_str}")
+
+    print(f"\nИтого: {total} записей из {len(epubs)} томов.")
     return 0
 
 

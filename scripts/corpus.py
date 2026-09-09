@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Чтение структурированных txt (результат epub_to_txt.py) и нарезка на чанки.
+Чтение txt файлов (результат epub_to_txt.py) и нарезка на чанки.
 
-Формат входа — блоки:
-    ### META | vol=.. | type=.. | year=.. | num=.. | to=.. | date=.. | note=..
+Формат входа:
+    ### META | vol=5 | title=Война и мир | type=проза
     <абзацы через пустую строку>
 
-Одна запись (письмо/дневниковый раздел) режется на чанки по абзацам с ограничением
-по длине. Метаданные записи копируются в каждый чанк — их потом использует сервер
-для показа источника и (при желании) фильтрации.
+Метаданные (vol, title, type) копируются в каждый чанк.
 """
 from __future__ import annotations
 
@@ -19,20 +17,20 @@ from dataclasses import dataclass, field
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
-# Целевой размер чанка в символах. e5-small берёт до ~512 токенов;
-# ~1200 символов кириллицы это комфортно укладывает с запасом.
-CHUNK_CHARS = 1200
+# Целевой размер чанка в символах. mpnet-base-v2 берёт до ~512 токенов;
+# ~1500 символов кириллицы (≈400 токенов) даёт больше контекста с запасом.
+CHUNK_CHARS = 1500
 CHUNK_OVERLAP_PARAS = 1  # сколько абзацев перекрытия между соседними чанками
 
 
 @dataclass
 class Chunk:
     text: str                       # текст для эмбеддинга и показа
-    meta: dict = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)  # vol, title, type
 
 
 def _parse_meta(line: str) -> dict:
-    # "### META | vol=18 | type=письмо | ..."
+    """Парсит строку ### META | vol=5 | title=... | type=..."""
     line = line[len("### META"):].strip()
     if line.startswith("|"):
         line = line[1:]
@@ -102,12 +100,12 @@ def _split_long(para: str) -> list[str]:
 
 def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
     """
-    Читает все *.txt в data/, режет на чанки.
-    include_types — например {"письмо"} чтобы взять только письма.
-    None = всё (письма + дневники).
+    Читает все tom*.txt в data/, режет на чанки.
+    include_types — например {"проза"} чтобы взять только художественные произведения.
+    None = всё.
     """
     chunks: list[Chunk] = []
-    files = sorted(glob.glob(os.path.join(DATA_DIR, "*.txt")))
+    files = sorted(glob.glob(os.path.join(DATA_DIR, "tom*.txt")))
     for path in files:
         for meta, paras in _iter_records(path):
             if include_types and meta.get("type") not in include_types:
@@ -121,20 +119,19 @@ def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
 
 def source_label(meta: dict) -> str:
     """Человекочитаемая ссылка на источник для показа в ответе."""
-    t = meta.get("type", "")
     vol = meta.get("vol", "")
-    year = meta.get("year", "")
+    title = meta.get("title", "")
+    t = meta.get("type", "")
 
-    if t == "письмо":
-        who = meta.get("to", "")
-        num = meta.get("num", "")
-        return f"Письмо №{num} к {who}, {year}".strip().rstrip(",")
-    elif t == "дневник":
-        return f"Дневник, {year}".strip().rstrip(",")
-    elif t == "проза":
-        return f"Том {vol} (художественные произведения)"
-    else:
-        return f"Том {vol}"
+    parts = []
+    if vol:
+        parts.append(f"Том {vol}")
+    if title:
+        parts.append(title)
+    elif t:
+        parts.append(t)
+
+    return " — ".join(parts) if parts else "Неизвестный источник"
 
 
 if __name__ == "__main__":

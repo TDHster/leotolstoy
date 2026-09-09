@@ -43,3 +43,6 @@ server/static/favicon.ico
 
 # Документация миграции (может содержать чувствительную информацию о сервере)
 migrate-to-https.md
+server/static/Фотопортрет_Л._Толстого_(Шерер,_Набгольц_и_Ко)_(cropped).jpg
+.gitignore
+.gitignore
