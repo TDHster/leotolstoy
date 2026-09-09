@@ -3,7 +3,7 @@
 help:
 	@echo "Толстой-чат — команды (через uv):"
 	@echo "  make install     — uv sync (создать окружение + поставить зависимости)"
-	@echo "  make convert     — EPUB (тома 18-22) -> data/*.txt"
+	@echo "  make convert     — EPUB (все найденные тома) -> data/*.txt"
 	@echo "  make embeddings  — собрать индекс из data/*.txt -> index/ (на Mac)"
 	@echo "  make run         — запустить сервер локально (http://localhost:8000)"
 	@echo "  make deploy-index HOST=user@server DIR=/path — scp индекса на сервер"

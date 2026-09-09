@@ -2,13 +2,15 @@
 """
 Конвертер EPUB -> структурированный txt.
 
-Обрабатывает тома собрания сочинений Толстого (письма и дневники).
-На каждую запись (письмо или дневниковый год) пишет блок:
+Обрабатывает тома собрания сочинений Толстого. На каждую запись пишет блок:
 
     ### META | vol=18 | type=письмо | year=1849 | num=4 | to=С. Н. Толстому | date=... | note=...
     <текст записи, абзацы через пустую строку>
 
 Затем этот txt читает scripts/build_embeddings.py.
+
+Для томов 18-22 (письма/дневники) парсит структуру и метаданные.
+Для всех остальных томов извлекает весь текст целиком (тип "проза").
 
 Зависимостей нет — только стандартная библиотека.
 """
@@ -24,8 +26,8 @@ from dataclasses import dataclass, field
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 DATA_DIR = os.path.abspath(DATA_DIR)
 
-# Какие тома чем являются. Всё остальное игнорируем.
-VOLUME_TYPE = {
+# Тома с детальной структурой (письма/дневники)
+STRUCTURED_VOLUMES = {
     18: "письмо",
     19: "письмо",
     20: "письмо",
@@ -110,7 +112,7 @@ def _find_section_file(zf: zipfile.ZipFile, src: str, names: dict[str, str]) -> 
 
 
 def parse_volume(epub_path: str, vol: int) -> list[Record]:
-    rtype = VOLUME_TYPE[vol]
+    rtype = STRUCTURED_VOLUMES[vol]
     records: list[Record] = []
 
     with zipfile.ZipFile(epub_path) as zf:
@@ -157,6 +159,41 @@ def parse_volume(epub_path: str, vol: int) -> list[Record]:
     return records
 
 
+def parse_prose_volume(epub_path: str, vol: int) -> list[Record]:
+    """Парсинг художественных томов: весь текст целиком без детальной структуры."""
+    records: list[Record] = []
+
+    with zipfile.ZipFile(epub_path) as zf:
+        names = {n.lower(): n for n in zf.namelist()}
+
+        # Собираем все параграфы из всех HTML-файлов
+        all_paragraphs = []
+
+        # Ищем все HTML/XHTML файлы в text/ или Text/
+        for low_name, real_name in names.items():
+            if '/text/' in low_name and (low_name.endswith('.html') or low_name.endswith('.xhtml')):
+                # Пропускаем служебные файлы (обложка, лицензия и т.п.)
+                basename = os.path.basename(low_name)
+                if basename in ('cover.xhtml', 'cover.html', 'title.xhtml', 'title.html',
+                               'license.xhtml', 'license.html', 'titlepage.xhtml', 'titlepage.html',
+                               'annotation.xhtml', 'annotation.html'):
+                    continue
+
+                html = zf.read(real_name).decode('utf-8-sig', errors='replace')
+                paragraphs, _ = _extract_paragraphs(html)
+                all_paragraphs.extend(paragraphs)
+
+        if all_paragraphs:
+            records.append(Record(
+                vol=vol,
+                rtype="проза",
+                year="",
+                paragraphs=all_paragraphs,
+            ))
+
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Запись txt
 # ---------------------------------------------------------------------------
@@ -187,6 +224,7 @@ def write_txt(records: list[Record], out_path: str) -> None:
 
 
 def find_epubs() -> list[tuple[int, str]]:
+    """Ищет все EPUB-файлы с номером тома в имени."""
     found = []
     for root, _dirs, files in os.walk(DATA_DIR):
         for fn in files:
@@ -196,8 +234,7 @@ def find_epubs() -> list[tuple[int, str]]:
             if not m:
                 continue
             vol = int(m.group(1))
-            if vol in VOLUME_TYPE:
-                found.append((vol, os.path.join(root, fn)))
+            found.append((vol, os.path.join(root, fn)))
     found.sort()
     return found
 
@@ -205,19 +242,25 @@ def find_epubs() -> list[tuple[int, str]]:
 def main() -> int:
     epubs = find_epubs()
     if not epubs:
-        print(f"EPUB с письмами/дневниками (тома {sorted(VOLUME_TYPE)}) не найдены в {DATA_DIR}",
+        print(f"EPUB-файлы с номером тома не найдены в {DATA_DIR}",
               file=sys.stderr)
         return 1
 
     total = 0
     for vol, path in epubs:
-        rtype = VOLUME_TYPE[vol]
-        records = parse_volume(path, vol)
-        out_name = f"tom{vol}_{'pisma' if rtype == 'письмо' else 'dnevniki'}.txt"
+        # Выбор парсера в зависимости от типа тома
+        if vol in STRUCTURED_VOLUMES:
+            rtype = STRUCTURED_VOLUMES[vol]
+            records = parse_volume(path, vol)
+        else:
+            rtype = "проза"
+            records = parse_prose_volume(path, vol)
+
+        out_name = f"tom{vol}_{'pisma' if rtype == 'письмо' else 'dnevniki' if rtype == 'дневник' else 'proza'}.txt"
         out_path = os.path.join(DATA_DIR, out_name)
         write_txt(records, out_path)
         total += len(records)
-        print(f"Том {vol} ({rtype}): {len(records):>5} записей -> data/{out_name}")
+        print(f"Том {vol:2d} ({rtype:8s}): {len(records):>5} записей -> data/{out_name}")
 
     print(f"\nИтого: {total} записей.")
     return 0
