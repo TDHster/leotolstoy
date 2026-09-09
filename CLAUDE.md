@@ -33,7 +33,8 @@
 - Python 3.12, зависимости через **uv** (`pyproject.toml` + `uv.lock`).
 - FastAPI + uvicorn, httpx (вызов LLM), slowapi (rate limit).
 - Эмбеддинги: **fastembed** (ONNX, без torch), модель
-  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 dims, ~0.22 ГБ).
+  `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (768 dims, ~1.0 ГБ).
+  Более точная, чем MiniLM (384 dims), влезает в 2 ГБ RAM с запасом.
 - Docker + docker compose, тесты — pytest.
 
 ## Файлы
@@ -54,8 +55,8 @@
 
 ## Индекс (не в git)
 
-- `index/vectors.npy` — массив N×384, только числа (векторы, L2-нормализованы).
-  Размер: ~38 МБ для ~24.7 тыс. фрагментов.
+- `index/vectors.npy` — массив N×768, только числа (векторы, L2-нормализованы).
+  Размер: ~76 МБ для ~24.7 тыс. фрагментов (768 dims, mpnet-base-v2).
 - `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год).
   Размер: ~50-60 МБ.
 - Связь по позиции: i-й вектор ↔ i-й элемент chunks.json.
@@ -90,7 +91,9 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
 - **Совместимость эмбеддингов**: модель И версия `fastembed` на сервере должны
   совпадать с теми, чем собран индекс локально (иначе pooling разойдётся, поиск
   деградирует). Зафиксировано в `uv.lock`, ставится через `uv sync --frozen`.
-  При обновлении fastembed — пересобрать индекс.
+  При обновлении fastembed или смене модели — пересобрать индекс (`make embeddings`).
+  **Текущая модель: `paraphrase-multilingual-mpnet-base-v2`** (768 dims, перешли
+  с MiniLM-384 для улучшения качества поиска).
 - **Секреты**: `.env*`, `.deploy`, `certs/`, `favicon.ico` в `.gitignore`; в
   `.rsyncignore` их НЕТ (должны уехать на сервер). EPUB-издание 1978 г. под
   авторским правом — тоже не в git (`data/` игнорируется).

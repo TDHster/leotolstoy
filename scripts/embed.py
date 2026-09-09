@@ -15,14 +15,13 @@ from __future__ import annotations
 import os
 import numpy as np
 
-# По умолчанию — лёгкая многоязычная MiniLM (0.22 ГБ, 384 dims, есть в fastembed).
-# Хорошо держит русский, влезает в 2 ГБ с большим запасом.
-# Альтернатива для max-качества: intfloat/multilingual-e5-large (2.24 ГБ) — но
-# он не влезет в 2 ГБ, только на сервере пожирнее.
+# По умолчанию — sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+# (1.0 ГБ, 768 dims). Более точная модель, чем MiniLM, влезает в 2 ГБ RAM.
+# Старая модель (384 dims): sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 MODEL_NAME = os.environ.get(
-    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 )
-EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "768"))
 
 # e5-модели асимметричны и требуют префиксов query:/passage:.
 # MiniLM-paraphrase симметрична — префиксы ей не нужны (и даже вредят).
