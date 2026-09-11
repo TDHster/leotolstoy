@@ -119,19 +119,20 @@ def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
 
 def source_label(meta: dict) -> str:
     """Человекочитаемая ссылка на источник для показа в ответе."""
-    vol = meta.get("vol", "")
-    title = meta.get("title", "")
     t = meta.get("type", "")
+    vol = meta.get("vol", "")
+    year = meta.get("year", "")
 
-    parts = []
-    if vol:
-        parts.append(f"Том {vol}")
-    if title:
-        parts.append(title)
-    elif t:
-        parts.append(t)
-
-    return " — ".join(parts) if parts else "Неизвестный источник"
+    if t == "письмо":
+        who = meta.get("to", "")
+        num = meta.get("num", "")
+        return f"Письмо №{num} к {who}, {year}".strip().rstrip(",")
+    elif t == "дневник":
+        return f"Дневник, {year}".strip().rstrip(",")
+    elif t == "проза":
+        return f"Том {vol} (художественные произведения)"
+    else:
+        return f"Том {vol}"
 
 
 if __name__ == "__main__":

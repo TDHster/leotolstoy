@@ -11,6 +11,27 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
          font-family: Georgia, 'Times New Roman', serif; line-height:1.55; }
+  /* Фоновое изображение Толстого */
+  body::before {
+    content: '';
+    position: fixed;
+    left: calc((100vw - 760px) / 2 - 25vw);
+    top: 0;
+    width: 50vw;
+    height: 33vh;
+    background-image: url('/eletroleo.jpeg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    opacity: 0.15;
+    pointer-events: none;
+    z-index: -1;
+  }
+  @media (max-width: 760px) {
+    body::before {
+      left: -10vw;
+    }
+  }
   header { padding:22px 16px 10px; text-align:center; border-bottom:1px solid var(--line); }
   header h1 { margin:0; font-size:22px; font-weight:600; letter-spacing:.3px; }
   header p { margin:4px 0 0; color:var(--muted); font-size:13px; }

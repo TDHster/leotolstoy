@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Сборка индекса эмбеддингов (запускать локально: `make embeddings`).
+GPU-версия сборки индекса эмбеддингов.
+Использует PyTorch + CUDA через sentence-transformers.
 
-1. читает все data/*.txt -> чанки (scripts/corpus.py)
-2. эмбеддит их e5-small через ONNX (scripts/embed.py)
-3. сохраняет index/vectors.npy + index/chunks.json
+Требует: uv pip install sentence-transformers torch
 
-Эти два файла копируются на сервер (`make deploy-index` или вручную scp).
-На сервере эмбеддится только запрос пользователя — той же моделью.
+Запуск: make embeddings-gpu
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 from corpus import load_chunks, source_label  # noqa: E402
-from embed import embed_passages, EMBED_DIM   # noqa: E402
+from embed_gpu import embed_passages, EMBED_DIM   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 INDEX_DIR = os.path.join(ROOT, "index")
@@ -46,31 +44,16 @@ def main() -> int:
 
     texts = [c.text for c in chunks]
 
-    print(f"Эмбеддинг {len(texts)} чанков моделью MiniLM...")
-    print("Обработка батчами по 64 чанка (внутри по 8)...")
+    print(f"\n🚀 GPU-векторизация {len(texts)} чанков...")
     sys.stdout.flush()
     t0 = time.time()
 
-    # Батчи по 64 для прогресса, внутри model.embed обрабатывает по 8
-    batch_size = 64
-    all_vectors = []
+    # sentence-transformers сам делает батчинг и прогресс-бар
+    vectors = embed_passages(texts, batch_size=64)
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        batch_vecs = embed_passages(batch, batch_size=8)  # маленький batch_size для model.embed
-        all_vectors.append(batch_vecs)
-
-        processed = min(i + batch_size, len(texts))
-        pct = 100 * processed / len(texts)
-        elapsed = time.time() - t0
-        rate = processed / elapsed if elapsed > 0 else 0
-        eta = (len(texts) - processed) / rate if rate > 0 else 0
-
-        print(f"  [{processed}/{len(texts)}] {pct:.1f}% | {rate:.1f} чанков/с | ETA: {eta/60:.1f} мин", flush=True)
-
-    vectors = np.vstack(all_vectors)
     dt = time.time() - t0
-    print(f"Готово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с). Форма: {vectors.shape}", flush=True)
+    print(f"\n✅ Готово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с)")
+    print(f"Форма: {vectors.shape}")
 
     assert vectors.shape[1] == EMBED_DIM, f"неожиданная размерность {vectors.shape[1]}"
 

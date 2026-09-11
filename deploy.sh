@@ -79,7 +79,7 @@ if [ -f .rsyncignore ]; then
     RSYNC_EXCLUDE=(--exclude-from=.rsyncignore)
 fi
 
-if rsync -avz --delete -e "ssh -p $SSH_PORT" "${RSYNC_EXCLUDE[@]}" ./ "$SSH_HOST:$PROJECT_DIR/"; then
+if rsync -avzP --delete -e "ssh -p $SSH_PORT" "${RSYNC_EXCLUDE[@]}" ./ "$SSH_HOST:$PROJECT_DIR/"; then
     echo "✅ Sync completed successfully."
 
     echo "🚀 Running command on server: $REMOTE_COMMAND"
