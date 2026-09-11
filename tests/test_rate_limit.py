@@ -21,13 +21,10 @@ def low_limit_client(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_LOGIN", "3/minute")  # низкий лимит на вход
     monkeypatch.setenv("RATE_LIMIT_CHAT", "3/minute")
 
-    for m in ("app", "embed", "retriever"):
+    for m in ("app", "embed", "retriever", "embedders"):
         sys.modules.pop(m, None)
-    import embed
-    monkeypatch.setattr(embed, "embed_query", lambda t: np.zeros(3, dtype=np.float32))
     import app as app_module
     monkeypatch.setattr(app_module, "Retriever", FakeRetriever)
-    monkeypatch.setattr(app_module, "embed_query", lambda t: np.zeros(3, dtype=np.float32))
 
     from fastapi.testclient import TestClient
     with TestClient(app_module.app) as c:
@@ -42,3 +39,4 @@ def test_login_rate_limited(low_limit_client):
     # первые 3 — 200, дальше 429
     assert codes[:3] == [200, 200, 200]
     assert codes[3] == 429
+

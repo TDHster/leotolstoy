@@ -12,6 +12,8 @@
 # оборачивает роуты, и при строковых аннотациях FastAPI не распознаёт тело
 # запроса (принимает его за query-параметр). Держим реальные аннотации.
 import asyncio
+import glob
+import json
 import logging
 import os
 import secrets
@@ -35,7 +37,6 @@ load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))  # server/ (retriever)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))  # embed, corpus
-from embed import embed_query  # noqa: E402
 from retriever import Retriever  # noqa: E402
 
 # --- логирование -------------------------------------------------------------
@@ -91,23 +92,51 @@ SYSTEM_PROMPT = """\
 
 
 # --- lifespan (загрузка индекса и прогрев эмбеддера при старте) --------------
-_retriever: Retriever | None = None
+_retrievers: dict[str, Retriever] = {}  # кеш: model_id -> Retriever
+
+
+def _get_index_dir(model_id: str) -> str:
+    """Маппинг model_id → каталог индекса."""
+    if model_id == "local":
+        return os.path.join(os.path.dirname(__file__), "..", "index")
+    # Для внешних моделей: index.<model_id>/
+    return os.path.join(os.path.dirname(__file__), "..", f"index.{model_id}")
+
+
+def _get_retriever(model_id: str) -> Retriever:
+    """Получить retriever для модели (с кешем в памяти)."""
+    if model_id not in _retrievers:
+        index_dir = _get_index_dir(model_id)
+        if not os.path.exists(index_dir):
+            raise HTTPException(404, f"Индекс для модели '{model_id}' не найден. Доступные: {list(_retrievers.keys())}")
+        _retrievers[model_id] = Retriever(index_dir=index_dir)
+    return _retrievers[model_id]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _retriever
     if not APP_PASS:
         log.warning("APP_PASS не задан — авторизация будет отклонять всех. Задайте APP_PASS в .env")
     if not LLM_KEY:
         log.warning("LLM_API_KEY (или OPENROUTER_API_KEY) не задан — генерация работать не будет.")
-    _retriever = Retriever()
+
+    # Загрузка локального индекса при старте (для обратной совместимости)
     try:
-        await run_in_threadpool(embed_query, "прогрев")  # прогрев модели
-    except Exception as e:  # noqa: BLE001
-        log.warning("Не удалось прогреть эмбеддер: %s", e)
-    log.info("Индекс загружен: %d фрагментов. Модель: %s @ %s",
-             len(_retriever), LLM_MODEL, LLM_BASE_URL)
+        _retrievers["local"] = Retriever(index_dir=_get_index_dir("local"))
+        log.info("Индекс 'local' загружен: %d фрагментов", len(_retrievers["local"]))
+    except FileNotFoundError as e:
+        log.warning("Локальный индекс не найден: %s", e)
+
+    # Прогрев локальной модели (если она есть)
+    if "local" in _retrievers:
+        try:
+            embedder = _retrievers["local"].get_embedder()
+            await run_in_threadpool(embedder.embed_query, "прогрев")
+            log.info("Локальная модель прогрета")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не удалось прогреть локальную модель: %s", e)
+
+    log.info("Сервер готов. Модель генерации: %s @ %s", LLM_MODEL, LLM_BASE_URL)
     yield
 
 
@@ -144,6 +173,7 @@ async def auth(cred: HTTPBasicCredentials = Depends(security)) -> str:
 
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
+    model: str = Field(default="local")  # "local" или id другой модели (например "qwen3-embedding-8b")
 
 
 class ChatOut(BaseModel):
@@ -171,12 +201,27 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
     if LOG_QUERIES:
         # логируем запрос сразу — попадёт в лог даже если LLM потом упадёт
         client_ip = request.client.host if request.client else "?"
-        log.info("запрос от %s (%s): %r", _user, client_ip, msg)
+        log.info("запрос от %s (%s), модель '%s': %r", _user, client_ip, body.model, msg)
+
+    # Получить retriever для выбранной модели
+    try:
+        retriever = _get_retriever(body.model)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Не удалось загрузить индекс для модели '%s': %s", body.model, e)
+        raise HTTPException(500, f"Ошибка загрузки индекса: {e}") from e
+
+    # Получить эмбеддер для этого индекса
+    embedder = retriever.get_embedder()
 
     # 1. поиск релевантных фрагментов (эмбеддинг CPU-bound → в threadpool,
     #    чтобы не блокировать event loop)
-    qvec = await run_in_threadpool(embed_query, msg)
-    results = _retriever.search(qvec, top_k=TOP_K, types=SRC_TYPES_SET)
+    t_embed = time.monotonic()
+    qvec = await run_in_threadpool(embedder.embed_query, msg)
+    embed_ms = int((time.monotonic() - t_embed) * 1000)
+
+    results = retriever.search(qvec, top_k=TOP_K, types=SRC_TYPES_SET)
     context = build_context(results)
     top_score = results[0]["score"] if results else 0.0
 
@@ -222,8 +267,15 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
         raise HTTPException(502, f"Неожиданный ответ LLM-провайдера: {str(data)[:300]}") from e
 
     total_ms = int((time.monotonic() - t0) * 1000)
-    log.info("chat: len=%d top_score=%.3f llm=%dms total=%dms",
-             len(msg), top_score, llm_ms, total_ms)
+    log.info(
+        "chat: model=%s len=%d top_score=%.3f embed=%dms llm=%dms total=%dms",
+        body.model,
+        len(msg),
+        top_score,
+        embed_ms,
+        llm_ms,
+        total_ms,
+    )
     if LOG_QUERIES:
         log.info("ответ: %r", reply)
 
@@ -231,7 +283,7 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
         {
             "source": r["source"],
             "score": round(r["score"], 3),
-            "text": r["text"],           # оригинальный фрагмент, ушедший в модель
+            "text": r["text"],  # оригинальный фрагмент, ушедший в модель
             "type": r["meta"].get("type", ""),
             "year": r["meta"].get("year", ""),
         }
@@ -260,8 +312,63 @@ def favicon():
 
 @app.get("/health")
 def health():
-    n = len(_retriever) if _retriever else 0
-    return {"status": "ok", "chunks": n, "model": LLM_MODEL, "endpoint": LLM_BASE_URL}
+    # Список загруженных моделей
+    models_info = {model_id: len(r) for model_id, r in _retrievers.items()}
+    return {
+        "status": "ok",
+        "models": models_info,
+        "llm_model": LLM_MODEL,
+        "llm_endpoint": LLM_BASE_URL,
+    }
+
+
+@app.get("/models")
+def list_models() -> list[dict]:
+    """
+    Список доступных моделей эмбеддингов для UI.
+
+    Сканирует каталоги index* и читает metadata.json из каждого.
+    """
+    import glob
+
+    models = []
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    for index_path in glob.glob(os.path.join(root, "index*")):
+        if not os.path.isdir(index_path):
+            continue
+
+        # Определить model_id из имени каталога
+        basename = os.path.basename(index_path)
+        if basename == "index":
+            model_id = "local"
+        else:
+            model_id = basename.replace("index.", "")
+
+        # Загрузить metadata.json
+        metadata_path = os.path.join(index_path, "metadata.json")
+        if os.path.exists(metadata_path):
+            with open(metadata_path, encoding="utf-8") as f:
+                metadata = json.load(f)
+        else:
+            # fallback для старых индексов
+            metadata = {
+                "display_name": "Локальная модель" if model_id == "local" else model_id,
+                "latency_ms": 50,
+                "cost_per_1k": 0,
+            }
+
+        models.append(
+            {
+                "id": model_id,
+                "name": metadata.get("display_name", model_id),
+                "latency_ms": metadata.get("latency_ms", 50),
+                "cost_per_1k": metadata.get("cost_per_1k", 0),
+                "dimensions": metadata.get("dimensions", "unknown"),
+            }
+        )
+
+    return models
 
 
 # статика (css/js если понадобится) — тоже под авторизацией не делаем,

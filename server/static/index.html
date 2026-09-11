@@ -36,6 +36,60 @@
   header { padding:22px 16px 10px; text-align:center; border-bottom:1px solid var(--line); }
   header h1 { margin:0; font-size:22px; font-weight:600; letter-spacing:.3px; }
   header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+
+  /* iOS-style переключатель моделей */
+  .model-selector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--paper);
+    flex-wrap: wrap;
+  }
+  .model-selector > span {
+    font-size: 14px;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .toggle-switch {
+    position: relative;
+    width: 54px;
+    height: 30px;
+    background: #ccc;
+    border-radius: 30px;
+    cursor: pointer;
+    transition: background 0.3s ease;
+    flex-shrink: 0;
+  }
+  .toggle-switch.active {
+    background: var(--accent);
+  }
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 24px;
+    height: 24px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    transition: left 0.3s ease;
+  }
+  .toggle-switch.active::after {
+    left: 27px;
+  }
+  .model-info {
+    font-size: 12px;
+    color: var(--muted);
+    font-style: italic;
+    width: 100%;
+    text-align: center;
+    margin-top: -4px;
+  }
+
   #chat { max-width:760px; margin:0 auto; padding:16px; }
   .msg { margin:14px 0; display:flex; }
   .msg.user { justify-content:flex-end; }
@@ -73,6 +127,13 @@
   <p>Ответы составляются по его письмам и дневникам</p>
 </header>
 
+<div class="model-selector">
+  <span>Локальная</span>
+  <div class="toggle-switch" id="modelToggle" title="Переключить модель эмбеддингов"></div>
+  <span>Qwen3-8B</span>
+  <div class="model-info" id="modelInfo">~50ms, бесплатно</div>
+</div>
+
 <div id="chat">
   <div class="msg bot"><div class="bubble">Здравствуйте. О чём вы желали бы поговорить? Спрашивайте о жизни, труде, вере, семье — о чём угодно.</div></div>
 </div>
@@ -87,6 +148,36 @@ const chat = document.getElementById('chat');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
+const modelToggle = document.getElementById('modelToggle');
+const modelInfo = document.getElementById('modelInfo');
+
+// Состояние выбранной модели
+let currentModel = 'local';
+
+// Конфигурация моделей
+const models = {
+  local: {
+    id: 'local',
+    latency: '~50ms',
+    cost: 'бесплатно',
+    name: 'Локальная (MiniLM)'
+  },
+  qwen: {
+    id: 'qwen3-embedding-8b',
+    latency: '~350ms',
+    cost: '$0.01 за 1000 запросов',
+    name: 'Qwen3 Embedding 8B'
+  }
+};
+
+// Переключатель моделей
+modelToggle.addEventListener('click', () => {
+  modelToggle.classList.toggle('active');
+  const isQwen = modelToggle.classList.contains('active');
+  currentModel = isQwen ? models.qwen.id : models.local.id;
+  const modelConfig = isQwen ? models.qwen : models.local;
+  modelInfo.textContent = `${modelConfig.latency}, ${modelConfig.cost}`;
+});
 
 function addMsg(role, text) {
   const wrap = document.createElement('div');
@@ -130,7 +221,10 @@ async function ask(text) {
     const r = await fetch('/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text}),
+      body: JSON.stringify({
+        message: text,
+        model: currentModel  // Передаём выбранную модель
+      }),
     });
     if (!r.ok) {
       const t = await r.text();

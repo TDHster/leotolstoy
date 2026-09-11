@@ -11,16 +11,41 @@ sys.path.insert(0, os.path.join(ROOT, "server"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 
+class FakeEmbedder:
+    """Заглушка эмбеддера — возвращает нулевые векторы."""
+    @property
+    def dimensions(self):
+        return 3
+
+    @property
+    def model_name(self):
+        return "fake-model"
+
+    def embed_query(self, text):
+        return np.zeros(3, dtype=np.float32)
+
+    def embed_passages(self, texts, batch_size=32):
+        return np.zeros((len(texts), 3), dtype=np.float32)
+
+
 class FakeRetriever:
     """Мини-заглушка индекса — без файлов и модели."""
     def __init__(self, *a, **k):
-        pass
+        self.metadata = {
+            "model": "fake",
+            "dimensions": 3,
+            "api": False,
+            "display_name": "Fake Model"
+        }
 
     def search(self, qvec, top_k=5, types=None):
         return [
             {"text": "Труд есть условие жизни.", "source": "Письмо №1, 1880",
              "meta": {"type": "письмо", "year": "1880"}, "score": 0.7},
         ]
+
+    def get_embedder(self):
+        return FakeEmbedder()
 
     def __len__(self):
         return 1
@@ -39,14 +64,11 @@ def client(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_LOGIN", "1000/minute")
 
     # свежий импорт app с этими env
-    for m in ("app", "embed", "retriever"):
+    for m in ("app", "embed", "retriever", "embedders"):
         sys.modules.pop(m, None)
-    import embed
-    monkeypatch.setattr(embed, "embed_query", lambda text: np.zeros(3, dtype=np.float32))
 
     import app as app_module
     monkeypatch.setattr(app_module, "Retriever", FakeRetriever)
-    monkeypatch.setattr(app_module, "embed_query", lambda text: np.zeros(3, dtype=np.float32))
 
     # мок LLM: httpx.AsyncClient.post → фейковый ответ OpenAI-формата
     class FakeResp:
@@ -67,3 +89,4 @@ def client(monkeypatch):
     with TestClient(app_module.app) as c:
         c._app_module = app_module  # доступ к модулю из тестов при нужде
         yield c
+
