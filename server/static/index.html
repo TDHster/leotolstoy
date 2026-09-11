@@ -11,7 +11,7 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
          font-family: Georgia, 'Times New Roman', serif; line-height:1.55; }
-  /* Фоновое изображение Толстого */
+  /* Фоновое изображение Толстого - отключено
   body::before {
     content: '';
     position: fixed;
@@ -19,7 +19,7 @@
     top: 0;
     width: 50vw;
     height: 33vh;
-    background-image: url('/eletroleo.jpeg');
+    background-image: url('/static/eletroleo.jpeg');
     background-size: cover;
     background-position: center;
     background-repeat: no-repeat;
@@ -27,6 +27,7 @@
     pointer-events: none;
     z-index: -1;
   }
+  */
   @media (max-width: 760px) {
     body::before {
       left: -10vw;
