@@ -71,12 +71,46 @@ def main() -> int:
     embedder = OpenRouterEmbedder(model=model, api_key=api_key, base_url=base_url, timeout=30.0)
 
     t0 = time.time()
+
+    # Обёртка для embed_passages с прогресс-баром
+    batch_size = 100
+    all_vecs = []
+
     try:
-        # Батчи по 100 (лимит OpenRouter)
-        vectors = embedder.embed_passages(texts, batch_size=100)
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            batch_vecs = embedder._call_api(batch)
+            all_vecs.append(batch_vecs)
+
+            # Прогресс
+            processed = min(i + batch_size, len(texts))
+            percent = 100 * processed / len(texts)
+            elapsed = time.time() - t0
+            rate = processed / elapsed if elapsed > 0 else 0
+            eta_sec = (len(texts) - processed) / rate if rate > 0 else 0
+            eta_min = eta_sec / 60
+
+            # Прогресс-бар
+            bar_width = 40
+            filled = int(bar_width * processed / len(texts))
+            bar = '█' * filled + '░' * (bar_width - filled)
+
+            print(f"\r[{bar}] {percent:.1f}% | {processed}/{len(texts)} | "
+                  f"{rate:.1f} чанков/с | ETA: {eta_min:.1f} мин", end='', flush=True)
+
+        print()  # новая строка после прогресс-бара
     except Exception as e:
-        print(f"\nОшибка при вызове API: {e}", file=sys.stderr)
+        print(f"\n\nОшибка при вызове API: {e}", file=sys.stderr)
         return 1
+
+    vectors = np.vstack(all_vecs)
+    # Нормализация
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    vectors = vectors / norms
+
+    # Запоминаем размерность
+    embedder._dimensions = vectors.shape[1]
 
     dt = time.time() - t0
     print(f"\nГотово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с). Форма: {vectors.shape}")
@@ -99,8 +133,9 @@ def main() -> int:
     print(f"Оценка: ~{est_tokens:,} токенов, ~${est_cost:.2f} ({model})")
 
     # Определить каталог индекса
-    model_slug = model.replace("/", "-").replace(".", "-")
-    index_dir = os.path.join(ROOT, f"index.{model_slug}")
+    # model_id для фронтенда: "qwen/qwen3-embedding-8b" → "qwen3-embedding-8b" (только последняя часть)
+    model_id = model.split("/")[-1] if "/" in model else model
+    index_dir = os.path.join(ROOT, f"index.{model_id}")
     os.makedirs(index_dir, exist_ok=True)
 
     # Сохранение vectors.npy (int8 для экономии памяти)
