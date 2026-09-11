@@ -93,6 +93,7 @@ SYSTEM_PROMPT = """\
 
 # --- lifespan (загрузка индекса и прогрев эмбеддера при старте) --------------
 _retrievers: dict[str, Retriever] = {}  # кеш: model_id -> Retriever
+MAX_LOADED_INDICES = 1  # максимум индексов в памяти одновременно (для экономии RAM)
 
 
 def _get_index_dir(model_id: str) -> str:
@@ -104,12 +105,25 @@ def _get_index_dir(model_id: str) -> str:
 
 
 def _get_retriever(model_id: str) -> Retriever:
-    """Получить retriever для модели (с кешем в памяти)."""
+    """Получить retriever для модели (с кешем в памяти и автоматической выгрузкой)."""
     if model_id not in _retrievers:
         index_dir = _get_index_dir(model_id)
         if not os.path.exists(index_dir):
             raise HTTPException(404, f"Индекс для модели '{model_id}' не найден. Доступные: {list(_retrievers.keys())}")
+
+        # Если достигли лимита загруженных индексов → выгружаем старый
+        if len(_retrievers) >= MAX_LOADED_INDICES:
+            old_id = list(_retrievers.keys())[0]
+            log.info("Выгружаем индекс '%s' для освобождения памяти (limit: %d)", old_id, MAX_LOADED_INDICES)
+            del _retrievers[old_id]
+            # Принудительная сборка мусора для немедленного освобождения памяти
+            import gc
+            gc.collect()
+
+        # Загружаем новый индекс
+        log.info("Загружаем индекс '%s' из %s", model_id, index_dir)
         _retrievers[model_id] = Retriever(index_dir=index_dir)
+
     return _retrievers[model_id]
 
 

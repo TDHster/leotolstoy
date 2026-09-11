@@ -33,12 +33,6 @@ class Retriever:
                 f"Соберите его локально (make embeddings) и скопируйте index/ на сервер."
             )
 
-        # vectors уже L2-нормализованы при сборке
-        self.vectors: np.ndarray = np.load(vec_path).astype(np.float32)
-        with open(chunks_path, encoding="utf-8") as f:
-            self.chunks: list[dict] = json.load(f)
-        assert len(self.chunks) == self.vectors.shape[0], "рассинхрон векторов и чанков"
-
         # metadata.json (опционально для обратной совместимости)
         if os.path.exists(metadata_path):
             with open(metadata_path, encoding="utf-8") as f:
@@ -48,10 +42,33 @@ class Retriever:
             log.warning("metadata.json не найден в %s — используем дефолтные значения", index_dir)
             self.metadata = {
                 "model": "local",
-                "dimensions": self.vectors.shape[1],
+                "dimensions": 384,  # будет перезаписано ниже
                 "api": False,
                 "display_name": "Локальная модель",
+                "quantized": False,
+                "dtype": "float32",
             }
+
+        # Загрузка векторов с учётом квантизации
+        self.vectors: np.ndarray = np.load(vec_path)
+        self.is_quantized = self.metadata.get("quantized", False)
+        self.dtype = self.metadata.get("dtype", "float32")
+
+        if self.is_quantized:
+            log.info("Загружен квантизованный индекс (%s)", self.dtype)
+            # Векторы уже int8, ничего не делаем
+        else:
+            # float32 векторы
+            self.vectors = self.vectors.astype(np.float32)
+
+        # Обновить dimensions в metadata если она была дефолтной
+        if "dimensions" not in self.metadata or self.metadata["dimensions"] == 384:
+            self.metadata["dimensions"] = self.vectors.shape[1]
+
+        # chunks.json
+        with open(chunks_path, encoding="utf-8") as f:
+            self.chunks: list[dict] = json.load(f)
+        assert len(self.chunks) == self.vectors.shape[0], "рассинхрон векторов и чанков"
 
         # Проверка совместимости
         expected_dim = self.metadata.get("dimensions", self.vectors.shape[1])
@@ -62,18 +79,34 @@ class Retriever:
             )
 
         log.info(
-            "Загружен индекс: %s (%d чанков, %d dims, модель: %s)",
+            "Загружен индекс: %s (%d чанков, %d dims, модель: %s, dtype: %s, RAM: %.1f МБ)",
             index_dir,
             len(self.chunks),
             self.vectors.shape[1],
             self.metadata.get("model", "unknown"),
+            self.dtype,
+            self.vectors.nbytes / 1e6,
         )
 
     def search(self, query_vec: np.ndarray, top_k: int = 5,
                types: set[str] | None = None) -> list[dict]:
-        """query_vec — L2-нормализованный вектор запроса (EMBED_DIM,)."""
+        """
+        query_vec — L2-нормализованный вектор запроса (EMBED_DIM,), float32.
+
+        Если индекс квантизован (int8), конвертируем query_vec в int8 для поиска.
+        """
+        # Квантизация query если индекс квантизован
+        if self.is_quantized:
+            query_vec_search = (query_vec * 127).astype(np.int8)
+        else:
+            query_vec_search = query_vec
+
         # косинус = скалярное произведение (обе стороны нормализованы)
-        scores = self.vectors @ query_vec  # (N,)
+        scores = self.vectors @ query_vec_search  # (N,)
+
+        # Для int8: результат в диапазоне [-127*127, 127*127], нормализуем обратно
+        if self.is_quantized:
+            scores = scores.astype(np.float32) / (127 * 127)
 
         if types:
             mask = np.array(

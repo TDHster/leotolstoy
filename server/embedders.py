@@ -216,9 +216,9 @@ class OpenRouterEmbedder(BaseEmbedder):
         return vecs / norms
 
     def embed_query(self, text: str) -> np.ndarray:
-        """Эмбеддинг одного запроса."""
+        """Эмбеддинг одного запроса. Возвращает float32 вектор (для совместимости с int8 индексом)."""
         vecs = self._call_api([text])
-        return self._normalize(vecs)[0]
+        return self._normalize(vecs)[0]  # возвращаем float32, конвертация в int8 будет в retriever
 
     def embed_passages(self, texts: list[str], batch_size: int = 100) -> np.ndarray:
         """

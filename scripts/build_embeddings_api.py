@@ -18,6 +18,10 @@ import sys
 import time
 
 import numpy as np
+from dotenv import load_dotenv
+
+# Загрузка .env перед чтением переменных окружения
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from corpus import load_chunks, source_label  # noqa: E402
@@ -77,6 +81,11 @@ def main() -> int:
     dt = time.time() - t0
     print(f"\nГотово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с). Форма: {vectors.shape}")
 
+    # Квантизация float32 → int8 (4× экономия памяти, минимальная потеря качества)
+    print(f"\nКвантизация векторов: float32 → int8 (экономия RAM: 4×)")
+    vectors_int8 = (vectors * 127).astype(np.int8)
+    print(f"  Форма int8: {vectors_int8.shape}, размер: {vectors_int8.nbytes / 1e6:.1f} МБ")
+
     # Оценка стоимости (приблизительная, ~250 токенов на чанк)
     est_tokens = len(texts) * 250
     est_cost_per_1m = 0.01  # для qwen3-embedding-8b
@@ -94,31 +103,60 @@ def main() -> int:
     index_dir = os.path.join(ROOT, f"index.{model_slug}")
     os.makedirs(index_dir, exist_ok=True)
 
-    # Сохранение vectors.npy
+    # Сохранение vectors.npy (int8 для экономии памяти)
     vectors_path = os.path.join(index_dir, "vectors.npy")
-    np.save(vectors_path, vectors)
+    np.save(vectors_path, vectors_int8)
+
+    # Также сохраним float32 версию для сравнения (опционально, можно удалить потом)
+    vectors_f32_path = os.path.join(index_dir, "vectors_float32.npy")
+    np.save(vectors_f32_path, vectors)
+    print(f"\nСохранены две версии векторов:")
+    print(f"  vectors.npy (int8):       {os.path.getsize(vectors_path) / 1e6:.1f} МБ ← используется")
+    print(f"  vectors_float32.npy:      {os.path.getsize(vectors_f32_path) / 1e6:.1f} МБ (для сравнения)")
+    print(f"  Экономия: {(1 - vectors_int8.nbytes / vectors.nbytes) * 100:.0f}%")
 
     # Сохранение chunks.json (тот же, что для локальной модели)
-    meta_out = []
-    for c in chunks:
-        meta_out.append({
-            "text": c.text,
-            "source": source_label(c.meta),
-            "meta": c.meta,
-        })
+    # Можно использовать symlink для экономии памяти и диска
     chunks_path = os.path.join(index_dir, "chunks.json")
-    with open(chunks_path, "w", encoding="utf-8") as f:
-        json.dump(meta_out, f, ensure_ascii=False)
+    local_chunks_path = os.path.join(ROOT, "index", "chunks.json")
+
+    if os.path.exists(local_chunks_path) and not os.path.exists(chunks_path):
+        # Создаём symlink вместо копирования (экономия ~227 МБ)
+        try:
+            os.symlink(local_chunks_path, chunks_path)
+            print(f"\nСоздан symlink для chunks.json → экономия ~227 МБ")
+        except OSError:
+            # На Windows может не работать — копируем
+            print(f"\nSymlink не поддерживается, копируем chunks.json...")
+            with open(local_chunks_path, encoding="utf-8") as f:
+                local_chunks = json.load(f)
+            with open(chunks_path, "w", encoding="utf-8") as f:
+                json.dump(local_chunks, f, ensure_ascii=False)
+    elif not os.path.exists(chunks_path):
+        # Локального индекса нет — сохраняем chunks заново
+        meta_out = []
+        for c in chunks:
+            meta_out.append({
+                "text": c.text,
+                "source": source_label(c.meta),
+                "meta": c.meta,
+            })
+        with open(chunks_path, "w", encoding="utf-8") as f:
+            json.dump(meta_out, f, ensure_ascii=False)
+    else:
+        print(f"\nchunks.json уже существует, пропускаем")
 
     # Сохранение metadata.json (НОВОЕ)
     metadata = {
         "model": model,
         "dimensions": int(vectors.shape[1]),
         "api": True,
+        "quantized": True,  # НОВОЕ: флаг квантизации
+        "dtype": "int8",    # НОВОЕ: тип данных
         "display_name": _display_name(model),
         "latency_ms": 350,  # типичная latency для API
         "cost_per_1k": est_cost_per_1m * 1000 / 1_000_000,  # стоимость за 1000 запросов
-        "description": f"Внешняя модель через OpenRouter API",
+        "description": f"Внешняя модель через OpenRouter API (int8 quantized)",
     }
     metadata_path = os.path.join(index_dir, "metadata.json")
     with open(metadata_path, "w", encoding="utf-8") as f:
