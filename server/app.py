@@ -202,6 +202,64 @@ def build_context(results: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+@app.get("/models")
+async def list_models(_user: str = Depends(auth)):
+    """Список доступных моделей эмбеддингов с их характеристиками."""
+    available = []
+
+    # Сканируем директорию проекта на наличие индексов
+    root_dir = os.path.join(os.path.dirname(__file__), "..")
+    for entry in glob.glob(os.path.join(root_dir, "index*")):
+        if not os.path.isdir(entry):
+            continue
+
+        metadata_path = os.path.join(entry, "metadata.json")
+        if not os.path.exists(metadata_path):
+            continue
+
+        try:
+            with open(metadata_path, encoding="utf-8") as f:
+                meta = json.load(f)
+
+            # Определяем model_id из имени директории
+            dir_name = os.path.basename(entry)
+            if dir_name == "index":
+                model_id = "local"
+            else:
+                # index.qwen3-embedding-8b -> qwen3-embedding-8b
+                model_id = dir_name.replace("index.", "")
+
+            # Формируем описание для UI
+            display_name = meta.get("display_name", model_id)
+            dims = meta.get("dimensions", 0)
+            is_api = meta.get("api", False)
+            latency_ms = meta.get("latency_ms", 50 if not is_api else 350)
+            cost_per_1k = meta.get("cost_per_1k", 0)
+
+            # Форматируем стоимость
+            if cost_per_1k == 0:
+                cost_str = "бесплатно"
+            else:
+                cost_str = f"${cost_per_1k * 1000:.2f} за 1000 запросов"
+
+            available.append({
+                "id": model_id,
+                "name": display_name,
+                "dimensions": dims,
+                "latency": f"~{latency_ms}ms",
+                "cost": cost_str,
+                "is_api": is_api,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не удалось прочитать metadata для %s: %s", entry, e)
+            continue
+
+    # Сортируем: сначала local, потом остальные по имени
+    available.sort(key=lambda m: (m["id"] != "local", m["id"]))
+
+    return {"models": available}
+
+
 @app.post("/chat", response_model=ChatOut)
 @limiter.limit(RATE_LIMIT_CHAT)
 async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
@@ -232,7 +290,24 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
     # 1. поиск релевантных фрагментов (эмбеддинг CPU-bound → в threadpool,
     #    чтобы не блокировать event loop)
     t_embed = time.monotonic()
-    qvec = await run_in_threadpool(embedder.embed_query, msg)
+    try:
+        qvec = await run_in_threadpool(embedder.embed_query, msg)
+    except RuntimeError as e:
+        error_msg = str(e)
+        # Распознаём типичные ошибки API и даём понятное объяснение
+        if "403" in error_msg or "Access denied" in error_msg:
+            log.error("Embedding API заблокирован (403): %s", error_msg)
+            raise HTTPException(
+                503,
+                f"Модель '{body.model}' временно недоступна: API-провайдер заблокировал запросы с этого сервера. "
+                f"Попробуйте локальную модель или свяжитесь с администратором."
+            ) from e
+        elif "429" in error_msg or "rate limit" in error_msg.lower():
+            log.error("Embedding API rate limit: %s", error_msg)
+            raise HTTPException(429, f"Превышен лимит запросов для модели '{body.model}'. Попробуйте позже.") from e
+        else:
+            log.error("Ошибка эмбеддинга для модели '%s': %s", body.model, error_msg)
+            raise HTTPException(503, f"Не удалось обработать запрос с моделью '{body.model}': {error_msg[:200]}") from e
     embed_ms = int((time.monotonic() - t_embed) * 1000)
 
     results = retriever.search(qvec, top_k=TOP_K, types=SRC_TYPES_SET)

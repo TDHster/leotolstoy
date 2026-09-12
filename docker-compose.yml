@@ -19,6 +19,8 @@ services:
     volumes:
       # индекс (собран локально, перенесён на сервер) — read-only
       - ./index:/app/index:ro
+      # индекс для внешней модели Qwen (если есть) — read-only
+      - ./index.qwen3-embedding-8b:/app/index.qwen3-embedding-8b:ro
       # самоподписанный TLS-сертификат (сгенерирован scripts/gen_cert.sh) — read-only
       - ./certs:/app/certs:ro
       # кэш модели эмбеддингов: качается один раз, переживает пересборки

@@ -10,3 +10,5 @@ data/
 .deploy
 deploy.sh
 .rsyncignore
+# промежуточный float32 файл не нужен на сервере (используется только int8 vectors.npy)
+index.qwen3-embedding-8b/vectors_float32.npy

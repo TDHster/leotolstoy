@@ -128,10 +128,10 @@
 </header>
 
 <div class="model-selector">
-  <span>Локальная</span>
+  <span id="model1Label">Локальная</span>
   <div class="toggle-switch" id="modelToggle" title="Переключить модель эмбеддингов"></div>
-  <span>Qwen3-8B</span>
-  <div class="model-info" id="modelInfo">~50ms, бесплатно</div>
+  <span id="model2Label">Qwen3-8B</span>
+  <div class="model-info" id="modelInfo">загрузка...</div>
 </div>
 
 <div id="chat">
@@ -153,30 +153,76 @@ const modelInfo = document.getElementById('modelInfo');
 
 // Состояние выбранной модели
 let currentModel = 'local';
+let models = {};  // Загрузится из API
 
-// Конфигурация моделей
-const models = {
-  local: {
-    id: 'local',
-    latency: '~50ms',
-    cost: 'бесплатно',
-    name: 'Локальная (MiniLM)'
-  },
-  qwen: {
-    id: 'qwen3-embedding-8b',
-    latency: '~350ms',
-    cost: '$0.01 за 1000 запросов',
-    name: 'Qwen3 Embedding 8B'
+// Загрузка доступных моделей
+async function loadModels() {
+  try {
+    const r = await fetch('/models');
+    if (!r.ok) {
+      console.error('Failed to load models:', r.status);
+      return;
+    }
+    const data = await r.json();
+
+    // Преобразуем список в объект для удобства
+    const modelList = data.models || [];
+    if (modelList.length === 0) {
+      console.warn('No models available');
+      return;
+    }
+
+    // Первая модель (local) и вторая (если есть)
+    const localModel = modelList[0];
+    const secondModel = modelList[1];
+
+    models = {
+      local: localModel,
+      second: secondModel || null
+    };
+
+    // Обновляем UI
+    updateModelSelector();
+
+    // Если есть только одна модель, скрываем переключатель
+    if (!models.second) {
+      document.querySelector('.model-selector').style.display = 'none';
+    }
+  } catch (e) {
+    console.error('Error loading models:', e);
   }
-};
+}
+
+function updateModelSelector() {
+  if (!models.local) return;
+
+  const isSecondActive = currentModel !== 'local';
+  const activeModel = isSecondActive ? models.second : models.local;
+
+  if (activeModel) {
+    modelInfo.textContent = `${activeModel.latency}, ${activeModel.cost} (${activeModel.dimensions} dims)`;
+  }
+
+  // Обновляем лейблы
+  const label1 = document.getElementById('model1Label');
+  const label2 = document.getElementById('model2Label');
+
+  if (label1 && models.local) {
+    label1.textContent = models.local.name;
+  }
+  if (label2 && models.second) {
+    label2.textContent = models.second.name;
+  }
+}
 
 // Переключатель моделей
 modelToggle.addEventListener('click', () => {
+  if (!models.second) return;  // Нечего переключать
+
   modelToggle.classList.toggle('active');
-  const isQwen = modelToggle.classList.contains('active');
-  currentModel = isQwen ? models.qwen.id : models.local.id;
-  const modelConfig = isQwen ? models.qwen : models.local;
-  modelInfo.textContent = `${modelConfig.latency}, ${modelConfig.cost}`;
+  const isSecondActive = modelToggle.classList.contains('active');
+  currentModel = isSecondActive ? models.second.id : models.local.id;
+  updateModelSelector();
 });
 
 function addMsg(role, text) {
@@ -258,6 +304,9 @@ input.addEventListener('keydown', e => {
     form.requestSubmit();
   }
 });
+
+// Загружаем модели при старте
+loadModels();
 </script>
 </body>
 </html>

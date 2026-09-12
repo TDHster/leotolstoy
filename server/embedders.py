@@ -196,8 +196,22 @@ class OpenRouterEmbedder(BaseEmbedder):
                     log.warning("Rate limit (429), retry %d/%d через %ds", attempt + 1, self.max_retries, wait)
                     time.sleep(wait)
                 else:
-                    log.error("OpenRouter API error %d: %s", resp.status_code, resp.text[:500])
-                    raise RuntimeError(f"API returned {resp.status_code}: {resp.text[:300]}")
+                    error_text = resp.text[:500]
+                    if resp.status_code == 403:
+                        log.error(
+                            "OpenRouter API заблокирован (403). Возможные причины: "
+                            "IP-адрес сервера в блок-листе, недостаточно средств на счёте, "
+                            "или провайдер блокирует VPS-хостинг. Ответ: %s",
+                            error_text
+                        )
+                        raise RuntimeError(
+                            f"Access denied by OpenRouter (403). "
+                            f"Провайдер блокирует запросы с этого сервера. "
+                            f"Детали: {resp.text[:200]}"
+                        )
+                    else:
+                        log.error("OpenRouter API error %d: %s", resp.status_code, error_text)
+                        raise RuntimeError(f"API returned {resp.status_code}: {resp.text[:300]}")
 
             except httpx.RequestError as e:
                 if attempt < self.max_retries - 1:
