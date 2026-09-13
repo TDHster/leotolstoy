@@ -1,5 +1,10 @@
 verbatis.ru {
-    reverse_proxy localhost:8000
+    # Reverse proxy с форвардингом заголовков
+    reverse_proxy localhost:8000 {
+        # Форвардим реальный IP клиента в приложение
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 
     # Логи
     log {
@@ -7,7 +12,7 @@ verbatis.ru {
         format json
     }
 
-    # Заголовки безопасности
+    # Заголовки безопасности в ответах клиенту
     header {
         # Включить HSTS (только после проверки что всё работает!)
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -17,10 +22,6 @@ verbatis.ru {
         # Удаляем заголовок Server для безопасности
         -Server
     }
-
-    # Форвардим реальный IP клиента в приложение
-    header_up X-Real-IP {remote_host}
-    header_up X-Forwarded-Proto {scheme}
 }
 
 # Пример для добавления других сервисов на поддоменах:
