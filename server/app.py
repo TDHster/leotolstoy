@@ -98,17 +98,18 @@ MAX_LOADED_INDICES = 1  # максимум индексов в памяти од
 
 def _get_index_dir(model_id: str) -> str:
     """Маппинг model_id → каталог индекса."""
-    # Если задан INDEX_DIR в окружении — используем его
-    index_dir_env = os.environ.get("INDEX_DIR")
-    if index_dir_env:
-        root = os.path.join(os.path.dirname(__file__), "..")
-        return os.path.join(root, index_dir_env)
+    root = os.path.join(os.path.dirname(__file__), "..")
 
-    # Иначе — дефолтные пути по model_id
+    # INDEX_DIR в окружении переопределяет ТОЛЬКО локальный индекс —
+    # иначе оба переключателя в UI вели бы в один и тот же каталог.
     if model_id == "local":
-        return os.path.join(os.path.dirname(__file__), "..", "index")
+        index_dir_env = os.environ.get("INDEX_DIR")
+        if index_dir_env:
+            return os.path.join(root, index_dir_env)
+        return os.path.join(root, "index")
+
     # Для внешних моделей: index.<model_id>/
-    return os.path.join(os.path.dirname(__file__), "..", f"index.{model_id}")
+    return os.path.join(root, f"index.{model_id}")
 
 
 def _get_retriever(model_id: str) -> Retriever:
@@ -116,7 +117,7 @@ def _get_retriever(model_id: str) -> Retriever:
     if model_id not in _retrievers:
         index_dir = _get_index_dir(model_id)
         if not os.path.exists(index_dir):
-            raise HTTPException(404, f"Индекс для модели '{model_id}' не найден. Доступные: {list(_retrievers.keys())}")
+            raise HTTPException(404, f"Индекс для модели '{model_id}' не найден. Доступные модели: GET /models")
 
         # Если достигли лимита загруженных индексов → выгружаем старый
         if len(_retrievers) >= MAX_LOADED_INDICES:
@@ -127,9 +128,19 @@ def _get_retriever(model_id: str) -> Retriever:
             import gc
             gc.collect()
 
-        # Загружаем новый индекс
+        # Загружаем новый индекс. Фоллбек: если индекс повреждён/неконсистентен
+        # (например, пересобирается прямо сейчас) — не падаем, а отдаём 503
+        # с понятным объяснением; остальные модели продолжают работать.
         log.info("Загружаем индекс '%s' из %s", model_id, index_dir)
-        _retrievers[model_id] = Retriever(index_dir=index_dir)
+        try:
+            _retrievers[model_id] = Retriever(index_dir=index_dir)
+        except Exception as e:  # noqa: BLE001
+            log.error("Не удалось загрузить индекс '%s': %s", model_id, e)
+            raise HTTPException(
+                503,
+                f"Индекс модели '{model_id}' не удалось загрузить: {e}. "
+                f"Возможно, он пересобирается — выберите другую модель.",
+            ) from e
 
     return _retrievers[model_id]
 
@@ -141,12 +152,14 @@ async def lifespan(app: FastAPI):
     if not LLM_KEY:
         log.warning("LLM_API_KEY (или OPENROUTER_API_KEY) не задан — генерация работать не будет.")
 
-    # Загрузка локального индекса при старте (для обратной совместимости)
+    # Загрузка локального индекса при старте (для обратной совместимости).
+    # Фоллбек: если индекс отсутствует или повреждён (например, пересобирается),
+    # сервер стартует без него — остальные модели остаются доступны.
     try:
         _retrievers["local"] = Retriever(index_dir=_get_index_dir("local"))
         log.info("Индекс 'local' загружен: %d фрагментов", len(_retrievers["local"]))
-    except FileNotFoundError as e:
-        log.warning("Локальный индекс не найден: %s", e)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Локальный индекс не загружен (сервер работает без него): %s", e)
 
     # Прогрев локальной модели (если она есть)
     if "local" in _retrievers:
@@ -300,14 +313,26 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
         log.error("Не удалось загрузить индекс для модели '%s': %s", body.model, e)
         raise HTTPException(500, f"Ошибка загрузки индекса: {e}") from e
 
-    # Получить эмбеддер для этого индекса
-    embedder = retriever.get_embedder()
+    # Получить эмбеддер для этого индекса (API-модели требуют ключ в .env)
+    try:
+        embedder = retriever.get_embedder()
+    except RuntimeError as e:
+        log.error("Не удалось создать эмбеддер для модели '%s': %s", body.model, e)
+        raise HTTPException(503, str(e)) from e
 
     # 1. поиск релевантных фрагментов (эмбеддинг CPU-bound → в threadpool,
     #    чтобы не блокировать event loop)
     t_embed = time.monotonic()
     try:
         qvec = await run_in_threadpool(embedder.embed_query, msg)
+        # защита от рассинхрона размерностей (напр. провайдер сменил модель)
+        vectors = getattr(retriever, "vectors", None)
+        if vectors is not None and (qvec.ndim != 1 or qvec.shape[0] != vectors.shape[1]):
+            raise HTTPException(
+                503,
+                f"Модель '{body.model}' вернула вектор размерности {qvec.shape}, "
+                f"а индекс требует {vectors.shape[1]}. Выберите другую модель.",
+            )
     except RuntimeError as e:
         error_msg = str(e)
         # Распознаём типичные ошибки API и даём понятное объяснение
@@ -425,55 +450,6 @@ def health():
         "llm_model": LLM_MODEL,
         "llm_endpoint": LLM_BASE_URL,
     }
-
-
-@app.get("/models")
-def list_models() -> list[dict]:
-    """
-    Список доступных моделей эмбеддингов для UI.
-
-    Сканирует каталоги index* и читает metadata.json из каждого.
-    """
-    import glob
-
-    models = []
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-    for index_path in glob.glob(os.path.join(root, "index*")):
-        if not os.path.isdir(index_path):
-            continue
-
-        # Определить model_id из имени каталога
-        basename = os.path.basename(index_path)
-        if basename == "index":
-            model_id = "local"
-        else:
-            model_id = basename.replace("index.", "")
-
-        # Загрузить metadata.json
-        metadata_path = os.path.join(index_path, "metadata.json")
-        if os.path.exists(metadata_path):
-            with open(metadata_path, encoding="utf-8") as f:
-                metadata = json.load(f)
-        else:
-            # fallback для старых индексов
-            metadata = {
-                "display_name": "Локальная модель" if model_id == "local" else model_id,
-                "latency_ms": 50,
-                "cost_per_1k": 0,
-            }
-
-        models.append(
-            {
-                "id": model_id,
-                "name": metadata.get("display_name", model_id),
-                "latency_ms": metadata.get("latency_ms", 50),
-                "cost_per_1k": metadata.get("cost_per_1k", 0),
-                "dimensions": metadata.get("dimensions", "unknown"),
-            }
-        )
-
-    return models
 
 
 # статика (css/js если понадобится) — тоже под авторизацией не делаем,

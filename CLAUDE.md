@@ -25,7 +25,7 @@
 Ключевые решения:
 - **Эмбеддинги — локально**, одна модель при сборке и на сервере. Векторы документов
   считаются один раз локально; на сервере эмбеддится только запрос.
-- **Поиск — numpy** (brute-force косинус, ~24.7 тыс. фрагментов = ~1-3 мс). БД нет.
+- **Поиск — numpy** (brute-force косинус, ~19.6 тыс. фрагментов = ~1-3 мс). БД нет.
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт в `.env`).
 - **Локально = HTTP без Docker; сервер = Caddy (HTTPS, Let's Encrypt) → Docker (HTTP)**.
 - **Домен**: https://verbatis.ru (доступ через валидный TLS-сертификат).
@@ -34,9 +34,10 @@
 
 - Python 3.12, зависимости через **uv** (`pyproject.toml` + `uv.lock`).
 - FastAPI + uvicorn, httpx (вызов LLM), slowapi (rate limit).
-- Эмбеддинги: **fastembed** (ONNX, без torch), модель
-  `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (768 dims, ~1.0 ГБ).
-  Более точная, чем MiniLM (384 dims), влезает в 2 ГБ RAM с запасом.
+- Эмбеддинги: **fastembed** (ONNX, без torch), локальная модель
+  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 dims, ~120 МБ).
+  Опционально вторая модель `qwen/qwen3-embedding-8b` (4096 dims) через OpenRouter
+  API — переключается в UI, индексы живут параллельно (`index/` и `index.qwen3-embedding-8b/`).
 - Docker + docker compose, тесты — pytest.
 
 ## Файлы
@@ -46,7 +47,9 @@
 | `scripts/epub_to_txt.py` | EPUB (все тома) → `data/*.txt`: тома 18-22 с детальной структурой (письма/дневники), остальные — весь текст целиком |
 | `scripts/corpus.py` | чтение txt, нарезка на чанки + метаданные |
 | `scripts/embed.py` | общий модуль эмбеддингов (сборка и сервер) |
-| `scripts/build_embeddings.py` | сборка индекса → `index/vectors.npy` + `chunks.json` |
+| `scripts/build_embeddings.py` | сборка локального индекса → `index/vectors.npy` + `chunks.json` |
+| `scripts/build_embeddings_api.py` | сборка индекса внешней моделью (Qwen через OpenRouter) → `index.<model>/` |
+| `server/embedders.py` | LocalEmbedder (fastembed) + OpenRouterEmbedder (API) — выбор по metadata индекса |
 | `scripts/entrypoint.sh` | Docker entrypoint: включает TLS, если смонтированы сертификаты (устарело, TLS теперь на Caddy) |
 | `scripts/gen_cert.sh` | генерация самоподписанного TLS-сертификата на IP (устарело, используется Let's Encrypt через Caddy) |
 | `scripts/setup_caddy.sh` | установка и настройка Caddy на сервере Ubuntu |
@@ -60,12 +63,17 @@
 
 ## Индекс (не в git)
 
-- `index/vectors.npy` — массив N×768, только числа (векторы, L2-нормализованы).
-  Размер: ~76 МБ для ~24.7 тыс. фрагментов (768 dims, mpnet-base-v2).
+- `index/vectors.npy` — массив N×384 float32, L2-нормализован (MiniLM-L12-v2).
+  Размер: ~30 МБ для ~19.6 тыс. фрагментов.
+- `index.qwen3-embedding-8b/` — внешний индекс Qwen3-8B: `vectors.npy` N×4096 int8
+  (~80 МБ), `chunks.json` — symlink на `index/chunks.json`, `metadata.json`
+  помечает `api: true` / `quantized: true`.
 - `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год).
-  Размер: ~50-60 МБ.
+  Размер: ~43 МБ.
 - Связь по позиции: i-й вектор ↔ i-й элемент chunks.json.
-- Собирается локально (`make embeddings`), переносится на сервер (rsync/scp).
+- Индексы собираются там же, где используются: локальный — `make embeddings`,
+  внешний — `make embeddings-qwen` (на сервере). В `.rsyncignore` — `index*/`,
+  deploy.sh индексы не копирует и не удаляет.
 - Векторизация всех 22 томов занимает ~2-5 минут на обычном CPU.
 
 ### Альтернатива: векторизация через OpenRouter API (2026)
@@ -75,9 +83,9 @@
 
 **Цены на embedding модели (2026):**
 - **Qwen3 Embedding 8B**: $0.01 за 1M токенов (32K context, 8B params — лучшее качество)
-  - Для 87K чанков (~33M токенов): **$0.33** (~33₽)
+  - Для ~19.6K чанков (~5M токенов): **$0.05** (~5₽)
 - **Qwen3 Embedding 4B**: $0.02 за 1M токенов (32K context, 4B params)
-  - Для 87K чанков: **$0.66** (~66₽)
+  - Для ~19.6K чанков: **$0.10** (~10₽)
 - **LiquidAI LFM2.5-Embedding-350M**: **бесплатно**, но только 512 tokens context
 
 **Плюсы API:**
@@ -92,9 +100,9 @@
 - Нужна совместимость: если используете API для сборки, нужна та же модель 
   для эмбеддинга запросов на сервере
 
-**Текущий подход** (локальный CPU) остаётся основным — никаких внешних зависимостей
-для сборки индекса, полный контроль. API — опция для экспериментов или когда 
-нужно быстро пересобрать индекс.
+**Текущий подход**: обе модели живут параллельно — локальная MiniLM (бесплатная,
+основная) и внешняя Qwen3-8B (переключается в UI). Индекс внешней модели
+пересобирается на сервере: `make embeddings-qwen`.
 
 ## Команды
 
@@ -125,12 +133,18 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
   совпадать с теми, чем собран индекс локально (иначе pooling разойдётся, поиск
   деградирует). Зафиксировано в `uv.lock`, ставится через `uv sync --frozen`.
   При обновлении fastembed или смене модели — пересобрать индекс (`make embeddings`).
-  **Текущая модель: `paraphrase-multilingual-mpnet-base-v2`** (768 dims, перешли
-  с MiniLM-384 для улучшения качества поиска).
+  **Текущая локальная модель: `paraphrase-multilingual-MiniLM-L12-v2`** (384 dims).
+  Внешняя: `qwen/qwen3-embedding-8b` (4096 dims, int8-индекс) — runtime-запросы
+  к ней идут через OpenRouter, на сервере нужен `EXTERNAL_EMBEDDER_API_KEY` в `.env`.
 - **Предзагрузка модели на сервере**: при первом деплое `deploy.sh` автоматически
-  скачивает модель эмбеддингов (~500 МБ) в Docker volume `model_cache` **до** запуска
+  скачивает модель эмбеддингов (~120 МБ) в Docker volume `model_cache` **до** запуска
   контейнера. Это нужно чтобы избежать OOM kill при одновременной загрузке модели
-  и индекса (mem_limit: 1500m). Volume переживает пересборки контейнера.
+  и индекса (mem_limit: 2000m). Volume переживает пересборки контейнера.
+- **Индексы не едут через deploy.sh**: `index*/` в `.rsyncignore` — rsync их не
+  копирует и не удаляет (`--delete` не трогает excluded). Индексы собираются
+  и пересобираются на сервере (`make embeddings` / `make embeddings-qwen`).
+  Если каталог индекса отсутствует или повреждён при старте — сервер
+  запускается без этой модели, остальные работают.
 - **Секреты**: `.env*`, `.deploy`, `certs/`, `favicon.ico` в `.gitignore`; в
   `.rsyncignore` их НЕТ (должны уехать на сервер). EPUB-издание 1978 г. под
   авторским правом — тоже не в git (`data/` игнорируется).

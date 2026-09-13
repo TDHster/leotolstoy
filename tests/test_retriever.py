@@ -74,3 +74,58 @@ def test_desync_raises(tmp_path):
     )
     with pytest.raises(AssertionError):
         Retriever(index_dir=str(tmp_path))
+
+
+def _make_int8_index(tmp_path, vectors, chunks):
+    """int8-индекс с metadata (как у index.qwen3-embedding-8b на сервере)."""
+    np.save(tmp_path / "vectors.npy", np.asarray(vectors, dtype=np.int8))
+    (tmp_path / "chunks.json").write_text(
+        json.dumps(chunks, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "model": "qwen/qwen3-embedding-8b",
+                "dimensions": int(np.asarray(vectors).shape[1]),
+                "api": True,
+                "quantized": True,
+                "dtype": "int8",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return str(tmp_path)
+
+
+def test_search_int8_no_overflow(tmp_path):
+    """Регрессия: int8 @ int8 переполнялся, все косинусы были ≤ 0.008.
+
+    Векторы с нормой ровно 127 (как после build_embeddings_api.py), запрос —
+    первый вектор. До фикса numpy умножал int8-матрицы в int8 и результат
+    зажимался в [-128, 127] → максимум возможного косинуса = 127/16129 ≈ 0.008.
+    """
+    rng = np.random.default_rng(42)
+    dim, n = 128, 200
+    vecs = rng.standard_normal((n, dim)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    vecs_i8 = (vecs * 127).astype(np.int8)
+    # перенормировка до нормы 127, как в build_embeddings_api.py
+    norms = np.linalg.norm(vecs_i8.astype(np.float32), axis=1, keepdims=True)
+    vecs_i8 = (vecs_i8.astype(np.float32) / norms * 127).astype(np.int8)
+
+    chunks = [
+        {"text": f"фрагмент {i}", "source": f"Источник {i}",
+         "meta": {"type": "дневник", "year": "1900"}}
+        for i in range(n)
+    ]
+    r = Retriever(index_dir=_make_int8_index(tmp_path, vecs_i8, chunks))
+    assert r.is_quantized
+
+    # запрос = первый вектор (search сам квантизует float32 → int8)
+    res = r.search(vecs[0], top_k=3)
+    assert res[0]["source"] == "Источник 0"
+    assert res[0]["score"] > 0.2  # на баге максимум 0.0079
+    scores = [x["score"] for x in res]
+    assert scores == sorted(scores, reverse=True)
+    assert scores[0] > scores[-1] + 0.1  # не плоский список

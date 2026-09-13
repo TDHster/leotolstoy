@@ -26,9 +26,9 @@ convert:
 # Только письма:  make embeddings EMBED_TYPES=письмо
 embeddings:
 	uv run python scripts/build_embeddings.py
-	@if command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
-		echo "🔄 Перезапуск Docker контейнеров..."; \
-		docker compose restart; \
+	@if [ "$$(uname)" != "Darwin" ] && command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
+		echo "🔄 Запуск Docker контейнеров (up -d)..."; \
+		docker compose up -d; \
 	fi
 
 # GPU-версия (требует: uv pip install sentence-transformers torch)
@@ -38,9 +38,9 @@ embeddings-gpu:
 # API-версия (требует EXTERNAL_EMBEDDER_API_KEY в .env)
 embeddings-qwen:
 	uv run python scripts/build_embeddings_api.py
-	@if command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
-		echo "🔄 Перезапуск Docker контейнеров..."; \
-		docker compose restart; \
+	@if [ "$$(uname)" != "Darwin" ] && command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
+		echo "🔄 Запуск Docker контейнеров (up -d)..."; \
+		docker compose up -d; \
 	fi
 
 run:

@@ -168,8 +168,11 @@ def main() -> int:
     if os.path.exists(local_chunks_path) and not os.path.exists(chunks_path):
         # Создаём symlink вместо копирования (экономия ~227 МБ)
         try:
-            os.symlink(local_chunks_path, chunks_path)
-            print(f"\nСоздан symlink для chunks.json → экономия ~227 МБ")
+            # Относительный путь: работает и на хосте, и внутри Docker-контейнера
+            # (в контейнере index* смонтированы в /app/index*, путь хоста там не виден).
+            rel_target = os.path.relpath(local_chunks_path, index_dir)
+            os.symlink(rel_target, chunks_path)
+            print(f"\nСоздан symlink для chunks.json ({rel_target}) → экономия ~227 МБ")
         except OSError:
             # На Windows может не работать — копируем
             print(f"\nSymlink не поддерживается, копируем chunks.json...")

@@ -276,7 +276,7 @@ function esc(s) {
   return d.innerHTML;
 }
 
-function addSources(list) {
+function addSources(list, modelName) {
   if (!list || !list.length) return;
   const d = document.createElement('div');
   d.className = 'sources';
@@ -287,7 +287,10 @@ function addSources(list) {
         <blockquote>${esc(s.text)}</blockquote>
       </details>
     </li>`).join('');
-  d.innerHTML = `<details open><summary>Фрагменты, на которые опирался ответ (${list.length})</summary><ul class="srclist">${items}</ul></details>`;
+  const header = modelName
+    ? `Фрагменты, на которые опирался ответ (${list.length}) · модель: ${esc(modelName)}`
+    : `Фрагменты, на которые опирался ответ (${list.length})`;
+  d.innerHTML = `<details open><summary>${header}</summary><ul class="srclist">${items}</ul></details>`;
   chat.appendChild(d);
 }
 
@@ -313,7 +316,9 @@ async function ask(text) {
     const data = await r.json();
     thinking.classList.remove('thinking');
     thinking.textContent = data.reply;
-    addSources(data.sources);
+    // имя модели для подписи блока источников (не путать Qwen и локальную)
+    const activeModel = [models.local, models.second].find(m => m && m.id === currentModel);
+    addSources(data.sources, activeModel ? activeModel.name : currentModel);
   } catch (e) {
     thinking.textContent = 'Сеть недоступна: ' + e.message;
   } finally {

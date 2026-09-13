@@ -17,10 +17,20 @@ from dataclasses import dataclass, field
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
-# Целевой размер чанка в символах. mpnet-base-v2 берёт до ~512 токенов;
+# Целевой размер чанка в символах. MiniLM-L12-v2 берёт до ~512 токенов;
 # ~1500 символов кириллицы (≈400 токенов) даёт больше контекста с запасом.
 CHUNK_CHARS = 1500
 CHUNK_OVERLAP_PARAS = 1  # сколько абзацев перекрытия между соседними чанками
+
+# Справочный аппарат изданий (указатели имён, оглавления) не несёт смысловой
+# нагрузки для RAG — такие записи пропускаем при сборке индекса.
+JUNK_TITLE_RE = re.compile(r"^(УКАЗАТЕЛЬ|СОДЕРЖАНИЕ|ОГЛАВЛЕНИЕ)\b", re.IGNORECASE)
+
+
+def _is_junk_record(meta: dict) -> bool:
+    """True, если запись — справочный мусор (указатель/оглавление), а не текст."""
+    title = (meta.get("entry") or meta.get("title") or meta.get("to") or "").strip()
+    return bool(JUNK_TITLE_RE.match(title))
 
 
 @dataclass
@@ -253,6 +263,8 @@ def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
     for path in files:
         for meta, paras in _iter_records(path):
             if include_types and meta.get("type") not in include_types:
+                continue
+            if _is_junk_record(meta):
                 continue
             for i, ctext in enumerate(_chunk_paragraphs(paras)):
                 m = dict(meta)

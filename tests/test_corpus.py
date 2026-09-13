@@ -58,3 +58,16 @@ def test_source_label_diary():
     label = corpus.source_label(meta)
     assert "Дневник" in label
     assert "1886" in label
+
+
+def test_is_junk_record_filters_reference_matter():
+    # справочный аппарат изданий — мусор для RAG
+    assert corpus._is_junk_record({"entry": "УКАЗАТЕЛЬ СОБСТВЕННЫХ ИМЕН", "type": "дневник"})
+    assert corpus._is_junk_record({"title": "Содержание (из 48-го тома)", "type": "дневник"})
+    assert corpus._is_junk_record({"to": "ОГЛАВЛЕНИЕ", "type": "дневник"})
+    assert corpus._is_junk_record({"entry": "указатель имён", "type": "дневник"})
+    # обычные записи не фильтруются
+    assert not corpus._is_junk_record({"entry": "1877 г.", "to": "1877 г.", "type": "дневник"})
+    assert not corpus._is_junk_record({"to": "С. Н. Толстому", "type": "письмо"})
+    assert not corpus._is_junk_record({"entry": "Примечания", "type": "дневник"})
+    assert not corpus._is_junk_record({})

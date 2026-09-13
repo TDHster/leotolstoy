@@ -10,9 +10,9 @@ import os
 import numpy as np
 
 MODEL_NAME = os.environ.get(
-    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 )
-EMBED_DIM = int(os.environ.get("EMBED_DIM", "768"))
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
 
 _USE_E5_PREFIX = "e5" in MODEL_NAME.lower()
 

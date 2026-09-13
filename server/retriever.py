@@ -19,6 +19,8 @@ INDEX_DIR = os.environ.get("INDEX_DIR", os.path.join(ROOT, "index"))
 
 log = logging.getLogger("tolstoy.retriever")
 
+_INT8_SEARCH_BLOCK = 2048  # строк индекса на один float32-блок при int8-поиске (~32 МБ)
+
 
 class Retriever:
     def __init__(self, index_dir: str = INDEX_DIR):
@@ -41,7 +43,9 @@ class Retriever:
             # fallback для старых индексов без metadata
             log.warning("metadata.json не найден в %s — используем дефолтные значения", index_dir)
             self.metadata = {
-                "model": "local",
+                "model": os.environ.get(
+                    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                ),
                 "dimensions": 384,  # будет перезаписано ниже
                 "api": False,
                 "display_name": "Локальная модель",
@@ -69,8 +73,6 @@ class Retriever:
         with open(chunks_path, encoding="utf-8") as f:
             self.chunks: list[dict] = json.load(f)
 
-        # Отладка
-        print(f"DEBUG: chunks={len(self.chunks)} vectors={self.vectors.shape[0]} index_dir={index_dir}", flush=True)
         assert len(self.chunks) == self.vectors.shape[0], f"рассинхрон: {len(self.chunks)} чанков vs {self.vectors.shape[0]} векторов"
 
         # Проверка совместимости
@@ -111,11 +113,19 @@ class Retriever:
             query_vec_search = query_vec
 
         # косинус = скалярное произведение (обе стороны нормализованы)
-        scores = self.vectors @ query_vec_search  # (N,)
-
-        # Для int8: результат в диапазоне [-127*127, 127*127], нормализуем обратно
         if self.is_quantized:
-            scores = scores.astype(np.float32) / (127 * 127)
+            # int8 @ int8 в numpy переполняется (dtype результата не расширяется),
+            # поэтому считаем в float32. Блоками — чтобы не аллоцировать
+            # N×dim float32 (~320 МБ) целиком на каждый запрос.
+            q = query_vec_search.astype(np.float32)
+            scores = np.empty(self.vectors.shape[0], dtype=np.float32)
+            for start in range(0, self.vectors.shape[0], _INT8_SEARCH_BLOCK):
+                end = min(start + _INT8_SEARCH_BLOCK, self.vectors.shape[0])
+                scores[start:end] = self.vectors[start:end].astype(np.float32) @ q
+            # int8-векторы перенормированы до нормы 127 → косинус = dot / 127²
+            scores /= 127 * 127
+        else:
+            scores = self.vectors @ query_vec_search
 
         if types:
             mask = np.array(

@@ -1,25 +1,25 @@
 # Беседа с Л. Н. Толстым
 
 Чат, отвечающий в стиле Льва Толстого. RAG поверх его писем и дневников
-(тома 18–22 собрания сочинений), генерация — через внешнюю LLM (любой
+из всех томов собрания сочинений, генерация — через внешнюю LLM (любой
 OpenAI-совместимый API).
 
 ## Как это устроено
 
 ```
-Локальная машина (разово)             Сервер (~2 ГБ RAM)
+Локальная машина (разово)             Сервер (~4 ГБ RAM)
 ├─ make convert    EPUB → data/*.txt   └─ Caddy (reverse proxy, :443)
 ├─ make embeddings data/*.txt → index/     └─ TLS терминация (Let's Encrypt)
-└─ ./deploy.sh   rsync index/ на сервер        └─ Docker (FastAPI, :8000 HTTP)
+└─ ./deploy.sh  rsync кода (индексы собир. на сервере) └─ Docker (FastAPI, :8000 HTTP)
                                                    ├─ Basic Auth (1 пользователь)
-                                                   ├─ эмбеддинг запроса (mpnet/ONNX)
+                                                   ├─ эмбеддинг запроса (MiniLM/ONNX)
                                                    ├─ косинус-поиск top-k (numpy)
                                                    └─ генерация (внешняя LLM)
 ```
 
 - **Эмбеддинги — локально** (ONNX, без torch), одна модель при сборке и на сервере.
   Векторы документов считаются один раз локально; на сервере эмбеддится только запрос.
-- **Поиск — numpy** (корпус ~5.7 тыс. фрагментов, brute-force косинус — доли мс).
+- **Поиск — numpy** (корпус ~19.6 тыс. фрагментов, brute-force косинус — доли мс).
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт и модель в `.env`).
 - **Продакшн**: https://verbatis.ru (Caddy + Let's Encrypt автоматически).
 
@@ -29,7 +29,7 @@ OpenAI-совместимый API).
 
 ```bash
 make install       # uv sync — окружение + зависимости (из uv.lock)
-make convert       # EPUB тома 18–22 → data/*.txt (письма и дневники)
+make convert       # EPUB → data/*.txt (все тома)
 make embeddings    # data/*.txt → index/vectors.npy + index/chunks.json
 cp .env.example .env   # впишите APP_PASS и OPENROUTER_API_KEY
 make run           # http://localhost:8000  (логин из .env)
@@ -40,7 +40,7 @@ make run           # http://localhost:8000  (логин из .env)
 
 ## Данные
 
-`scripts/epub_to_txt.py` берёт тома 18–22 из `data/`:
+`scripts/epub_to_txt.py` берёт все тома из `data/`:
 - 18–20 — письма (1842–1910), 21–22 — дневники (1847–1910);
 - отделяет текст Толстого от редакторских сносок/комментариев;
 - проставляет метаданные (адресат, год, тип) — они видны в «Источниках» ответа
@@ -53,8 +53,9 @@ make run           # http://localhost:8000  (логин из .env)
 - **Локально** — HTTP, без Docker (`make run`), для разработки.
 - **Сервер** — Caddy (HTTPS, порт 443) → Docker (HTTP, localhost:8000).
 
-На сервере нужен Docker + docker compose + Caddy. Индекс собирается локально и
-переносится; в образ он не пекётся.
+На сервере нужен Docker + docker compose + Caddy. Индексы собираются там же,
+где используются (локальный — `make embeddings`, Qwen — `make embeddings-qwen`),
+в образ не пекутся и rsync'ом не синкаются (`.rsyncignore`: `index*/`).
 
 ### Полная инструкция
 

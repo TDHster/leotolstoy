@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Сборка индекса эмбеддингов (запускать локально: `make embeddings`).
+Сборка индекса эмбеддингов (`make embeddings` — локально или на сервере).
 
 1. читает все data/*.txt -> чанки (scripts/corpus.py)
-2. эмбеддит их e5-small через ONNX (scripts/embed.py)
+2. эмбеддит их локальной ONNX-моделью (scripts/embed.py, MiniLM по умолчанию)
 3. сохраняет index/vectors.npy + index/chunks.json
 
-Эти два файла копируются на сервер (`make deploy-index` или вручную scp).
-На сервере эмбеддится только запрос пользователя — той же моделью.
+Индексы не ходят в git и rsync (.rsyncignore: index*/) — сборка делается
+там же, где индекс будет использоваться. На сервере эмбеддится только
+запрос пользователя — той же моделью, что и при сборке.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from corpus import load_chunks, source_label  # noqa: E402
-from embed import embed_passages, EMBED_DIM   # noqa: E402
+from embed import embed_passages, EMBED_DIM, MODEL_NAME   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 INDEX_DIR = os.path.join(ROOT, "index")
@@ -50,7 +51,7 @@ def main() -> int:
 
     texts = [c.text for c in chunks]
 
-    print(f"Эмбеддинг {len(texts)} чанков моделью MiniLM...")
+    print(f"Эмбеддинг {len(texts)} чанков моделью {MODEL_NAME}...")
     print("Обработка батчами по 64 чанка (внутри по 8)...")
     sys.stdout.flush()
     t0 = time.time()
@@ -96,7 +97,8 @@ def main() -> int:
     print(f"\nСохранено:")
     print(f"  index/vectors.npy   {vec_mb:.1f} МБ")
     print(f"  index/chunks.json   {json_mb:.1f} МБ")
-    print(f"\nПеренос на сервер: scp -r index/ user@server:/path/to/app/")
+    print(f"\nСервер: индексы rsync'ом не синкаются (.rsyncignore: index*/) —")
+    print("соберите индекс на сервере: make embeddings")
     return 0
 
 
