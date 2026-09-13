@@ -12,13 +12,14 @@
 ## Архитектура
 
 ```
-Локальная машина (разработка, подготовка)   Сервер (прод, Docker)
-├─ make convert   EPUB → data/*.txt          └─ Docker + HTTPS на порту 8443
-├─ make embeddings data/*.txt → index/            └─ FastAPI (uvicorn, 1 worker)
-│     эмбеддинги локально (ONNX)                      ├─ Basic Auth (1 пользователь)
-├─ make run       локально по HTTP                    ├─ эмбеддинг запроса (ONNX, локально)
-└─ ./deploy.sh    rsync + тесты + compose             ├─ косинус-поиск top-k (numpy)
-                                                       └─ генерация (внешняя LLM)
+Локальная машина (разработка, подготовка)   Сервер (прод)
+├─ make convert   EPUB → data/*.txt          └─ Caddy (reverse proxy, :443)
+├─ make embeddings data/*.txt → index/            └─ TLS терминация (Let's Encrypt)
+│     эмбеддинги локально (ONNX)                      └─ Docker (FastAPI, :8000 HTTP localhost)
+├─ make run       локально по HTTP                        ├─ Basic Auth (1 пользователь)
+└─ ./deploy.sh    rsync + тесты + compose                 ├─ эмбеддинг запроса (ONNX)
+                                                           ├─ косинус-поиск top-k (numpy)
+                                                           └─ генерация (внешняя LLM)
 ```
 
 Ключевые решения:
@@ -26,7 +27,8 @@
   считаются один раз локально; на сервере эмбеддится только запрос.
 - **Поиск — numpy** (brute-force косинус, ~24.7 тыс. фрагментов = ~1-3 мс). БД нет.
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт в `.env`).
-- **Локально = HTTP без Docker; сервер = Docker + HTTPS** (самоподписанный серт на IP, 8443).
+- **Локально = HTTP без Docker; сервер = Caddy (HTTPS, Let's Encrypt) → Docker (HTTP)**.
+- **Домен**: https://verbatis.ru (доступ через валидный TLS-сертификат).
 
 ## Стек
 
@@ -45,8 +47,11 @@
 | `scripts/corpus.py` | чтение txt, нарезка на чанки + метаданные |
 | `scripts/embed.py` | общий модуль эмбеддингов (сборка и сервер) |
 | `scripts/build_embeddings.py` | сборка индекса → `index/vectors.npy` + `chunks.json` |
-| `scripts/entrypoint.sh` | Docker entrypoint: включает TLS, если смонтированы сертификаты |
-| `scripts/gen_cert.sh` | генерация самоподписанного TLS-сертификата на IP |
+| `scripts/entrypoint.sh` | Docker entrypoint: включает TLS, если смонтированы сертификаты (устарело, TLS теперь на Caddy) |
+| `scripts/gen_cert.sh` | генерация самоподписанного TLS-сертификата на IP (устарело, используется Let's Encrypt через Caddy) |
+| `scripts/setup_caddy.sh` | установка и настройка Caddy на сервере Ubuntu |
+| `Caddyfile` | конфигурация Caddy reverse proxy (копируется на сервер в `/etc/caddy/Caddyfile`) |
+| `CADDY_SETUP.md` | инструкция по переходу на Caddy + домен verbatis.ru |
 | `server/app.py` | FastAPI: auth, rate limit, RAG, вызов LLM |
 | `server/retriever.py` | загрузка индекса + косинусный поиск |
 | `server/static/index.html` | фронт (чат, показ фрагментов-источников) |

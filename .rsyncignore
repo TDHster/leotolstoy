@@ -4,11 +4,15 @@ __pycache__/
 *.pyc
 .DS_Store
 model_cache/
-# исходные данные не нужны на сервере — там работает только собранный index/
-data/
+# EPUB файлы не нужны на сервере (только txt для индексации)
+data/Толстой*
+data/90*/
+# временно не копируем индексы (будем пересобирать на сервере)
+index/
+index.qwen3-embedding-8b/
 # локальные артефакты
 .deploy
 deploy.sh
 .rsyncignore
-# промежуточный float32 файл не нужен на сервере (используется только int8 vectors.npy)
-index.qwen3-embedding-8b/vectors_float32.npy
+# самоподписанные сертификаты больше не нужны (TLS на Caddy)
+certs/

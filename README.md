@@ -8,18 +8,20 @@ OpenAI-совместимый API).
 
 ```
 Локальная машина (разово)             Сервер (~2 ГБ RAM)
-├─ make convert    EPUB → data/*.txt   └─ Docker + HTTPS на порту 8443
-├─ make embeddings data/*.txt → index/     └─ FastAPI (uvicorn, 1 worker)
-└─ ./deploy.sh   rsync index/ на сервер        ├─ Basic Auth (1 пользователь)
-                                               ├─ эмбеддинг запроса (MiniLM/ONNX)
-                                               ├─ косинус-поиск top-k (numpy)
-                                               └─ генерация (внешняя LLM)
+├─ make convert    EPUB → data/*.txt   └─ Caddy (reverse proxy, :443)
+├─ make embeddings data/*.txt → index/     └─ TLS терминация (Let's Encrypt)
+└─ ./deploy.sh   rsync index/ на сервер        └─ Docker (FastAPI, :8000 HTTP)
+                                                   ├─ Basic Auth (1 пользователь)
+                                                   ├─ эмбеддинг запроса (mpnet/ONNX)
+                                                   ├─ косинус-поиск top-k (numpy)
+                                                   └─ генерация (внешняя LLM)
 ```
 
 - **Эмбеддинги — локально** (ONNX, без torch), одна модель при сборке и на сервере.
   Векторы документов считаются один раз локально; на сервере эмбеддится только запрос.
 - **Поиск — numpy** (корпус ~5.7 тыс. фрагментов, brute-force косинус — доли мс).
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт и модель в `.env`).
+- **Продакшн**: https://verbatis.ru (Caddy + Let's Encrypt автоматически).
 
 ## Быстрый старт (локально)
 
@@ -46,36 +48,41 @@ make run           # http://localhost:8000  (логин из .env)
 
 Орфография в этом издании (1978) современная — нормализация не требуется.
 
-## Деплой на сервер (Docker Compose, HTTPS)
+## Деплой на сервер (Docker + Caddy + Let's Encrypt)
 
 - **Локально** — HTTP, без Docker (`make run`), для разработки.
-- **Сервер** — Docker + HTTPS на порту **8443** (порты 80/443 заняты другим сервисом).
+- **Сервер** — Caddy (HTTPS, порт 443) → Docker (HTTP, localhost:8000).
 
-На сервере нужен только Docker + docker compose. Индекс собирается локально и
+На сервере нужен Docker + docker compose + Caddy. Индекс собирается локально и
 переносится; в образ он не пекётся.
 
-Ниже `<SERVER_IP>` — публичный IP вашего сервера.
+### Полная инструкция
+
+См. [CADDY_SETUP.md](CADDY_SETUP.md) — пошаговая инструкция по переходу на домен
+с автоматическими Let's Encrypt сертификатами.
+
+### Краткая версия
 
 ```bash
-# 1. локально: сгенерировать самоподписанный сертификат на IP сервера (разово)
-scripts/gen_cert.sh <SERVER_IP>          # → certs/cert.pem + key.pem
+# 1. Настроить DNS: verbatis.ru → IP сервера (A-запись)
 
-# 2. локально: код + индекс + сертификаты на сервер (deploy.sh делает это rsync'ом)
-./deploy.sh                              # читает .deploy (SSH_HOST, PROJECT_DIR)
-#   либо вручную:
-rsync -av --exclude .venv --exclude data --exclude model_cache \
-      ./ user@<SERVER_IP>:/opt/tolstoy/
+# 2. Локально: деплой обновлённой конфигурации
+./deploy.sh
 
-# 3. на сервере: .env (APP_USER, APP_PASS, LLM_*), затем сборка и запуск
-ssh user@<SERVER_IP>
-cd /opt/tolstoy
-cp .env.example .env && nano .env        # впишите пароль и ключ LLM
-docker compose up -d --build
+# 3. На сервере: установить Caddy
+ssh root@<SERVER_IP>
+cd /opt/leotolstoy
+chmod +x scripts/setup_caddy.sh
+sudo ./scripts/setup_caddy.sh
+
+# 4. Проверка
+curl https://verbatis.ru/health
+# Должно вернуть: {"status":"ok"}
 ```
 
-Заход: **https://\<SERVER_IP\>:8443** — браузер один раз предупредит про
-самоподписанный сертификат («сайт не защищён» → принять исключение), дальше
-трафик шифруется. Ставить что-либо на клиенты не нужно.
+Caddy автоматически получит и обновит Let's Encrypt сертификаты.
+
+Заход: **https://verbatis.ru** — валидный зелёный замочек, без предупреждений браузера.
 
 Управление:
 
@@ -135,15 +142,11 @@ Docker), в prod-образ не попадает.
 
 - Basic Auth на всех роутах; пароль только в `.env` (не в коде, не в git —
   `*.env` в `.dockerignore` и `.gitignore`).
-- **Сервер: HTTPS** (самоподписанный сертификат на IP, порт 8443) — трафик, включая
-  пароль Basic Auth, шифруется. Браузер один раз предупреждает про сертификат.
+- **Сервер: HTTPS** (Let's Encrypt через Caddy) — трафик, включая пароль Basic Auth,
+  шифруется валидным сертификатом. Автоматическое обновление сертификатов.
 - **Локально: HTTP** без TLS — только для разработки (`make run`).
-- TLS-ключ `certs/key.pem` — секрет: в `.gitignore`/`.dockerignore`, но **уезжает
-  на сервер через rsync** (нужен контейнеру). В образ не пекётся — монтируется как
-  volume.
-- Самоподписанный сертификат шифрует, но не подтверждает подлинность сервера
-  сторонним CA. Для публичного сервиса с валидным сертификатом нужен домен + TLS
-  от Let's Encrypt (или sslip.io при свободном порту 443).
+- Docker контейнер доступен только через localhost:8000, публично открыт только
+  Caddy на портах 80 (для ACME challenge) и 443 (HTTPS).
 
 ### Защита от абьюза (rate limiting)
 
