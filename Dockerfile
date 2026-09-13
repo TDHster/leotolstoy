@@ -22,10 +22,9 @@ RUN uv sync --frozen --no-install-project --no-dev
 # 2. Код
 COPY scripts/ ./scripts/
 COPY server/ ./server/
-RUN chmod +x scripts/entrypoint.sh
 
-# index/, .env, certs/ и model_cache монтируются как volume при запуске (см. compose)
+# index/, .env и model_cache монтируются как volume при запуске (см. compose)
 EXPOSE 8000
 
-# TLS включается автоматически, если смонтированы сертификаты (TLS_CERT/TLS_KEY)
-ENTRYPOINT ["scripts/entrypoint.sh"]
+# TLS терминирует Caddy, приложение работает на HTTP
+CMD ["uv", "run", "--frozen", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

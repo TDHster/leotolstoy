@@ -68,7 +68,10 @@ class Retriever:
         # chunks.json
         with open(chunks_path, encoding="utf-8") as f:
             self.chunks: list[dict] = json.load(f)
-        assert len(self.chunks) == self.vectors.shape[0], "рассинхрон векторов и чанков"
+
+        # Отладка
+        print(f"DEBUG: chunks={len(self.chunks)} vectors={self.vectors.shape[0]} index_dir={index_dir}", flush=True)
+        assert len(self.chunks) == self.vectors.shape[0], f"рассинхрон: {len(self.chunks)} чанков vs {self.vectors.shape[0]} векторов"
 
         # Проверка совместимости
         expected_dim = self.metadata.get("dimensions", self.vectors.shape[1])
