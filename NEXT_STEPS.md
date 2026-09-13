@@ -39,21 +39,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 Тип: A
 Имя: @ (или verbatis.ru)
-Значение: 168.113.209.202
+Значение: 89.125.117.142
 TTL: 300
 ```
 
 Проверить пропагацию:
 ```bash
 dig verbatis.ru
-# Должно вернуть: 168.113.209.202
+# Должно вернуть: 89.125.117.142
 ```
 
 ### 3. Деплой
 
 ```bash
 # На сервере: остановить текущий контейнер
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 docker compose down
 exit
@@ -62,7 +62,7 @@ exit
 ./deploy.sh
 
 # На сервере: установить и настроить Caddy
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 chmod +x scripts/setup_caddy.sh
 sudo ./scripts/setup_caddy.sh

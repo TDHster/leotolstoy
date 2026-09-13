@@ -9,7 +9,7 @@
 ```
 Тип: A
 Имя: @ (или verbatis.ru)
-Значение: 168.113.209.202
+Значение: 89.125.117.142
 TTL: 300 (5 минут) или авто
 ```
 
@@ -21,7 +21,7 @@ dig verbatis.ru
 # или
 nslookup verbatis.ru
 
-# Должно показать: 168.113.209.202
+# Должно показать: 89.125.117.142
 ```
 
 ### 2. Проверка портов на сервере
@@ -29,7 +29,7 @@ nslookup verbatis.ru
 Подключитесь к серверу и проверьте что порты 80 и 443 свободны:
 
 ```bash
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 
 # Проверка портов
 sudo netstat -tulpn | grep ':80\|:443'
@@ -56,7 +56,7 @@ sudo ufw allow 443/tcp
 ### Шаг 1: Остановить текущий контейнер на сервере
 
 ```bash
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 docker compose down
 ```
@@ -76,7 +76,7 @@ docker compose down
 ### Шаг 3: Установка и настройка Caddy (на сервере)
 
 ```bash
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 
 # Сделать скрипт исполняемым (если нужно)
@@ -135,7 +135,7 @@ curl -I http://verbatis.ru
 |---|---|
 | Docker контейнер слушает HTTPS на 8000 внутри | Docker контейнер слушает HTTP на 8000 внутри |
 | Самоподписанный сертификат в `certs/` | Let's Encrypt сертификат (управляется Caddy) |
-| Доступ через `https://168.113.209.202:8443` | Доступ через `https://verbatis.ru` |
+| Доступ через `https://89.125.117.142:8443` | Доступ через `https://verbatis.ru` |
 | Порт 8443 публично открыт | Порт 8000 доступен только localhost |
 | Предупреждение браузера о сертификате | Валидный сертификат без предупреждений |
 
@@ -178,7 +178,7 @@ Caddy автоматически получит сертификаты для в
 
 ```bash
 # На сервере
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 
 # Остановить Caddy
@@ -192,7 +192,7 @@ git checkout docker-compose.yml
 docker compose up -d
 
 # Доступ по старому адресу
-# https://168.113.209.202:8443
+# https://89.125.117.142:8443
 ```
 
 ## Мониторинг
@@ -228,7 +228,7 @@ echo | openssl s_client -connect verbatis.ru:443 -servername verbatis.ru 2>/dev/
 ### Caddy не получает сертификат
 
 Проверьте:
-1. DNS правильно настроен: `dig verbatis.ru` → 168.113.209.202
+1. DNS правильно настроен: `dig verbatis.ru` → 89.125.117.142
 2. Порт 80 открыт (нужен для ACME challenge): `sudo netstat -tulpn | grep :80`
 3. Firewall не блокирует: `sudo ufw status`
 4. Логи Caddy: `sudo journalctl -u caddy -n 50`
@@ -263,7 +263,7 @@ nano Caddyfile
 ./deploy.sh
 
 # На сервере
-ssh root@168.113.209.202
+ssh root@89.125.117.142
 cd /opt/leotolstoy
 sudo cp Caddyfile /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile
