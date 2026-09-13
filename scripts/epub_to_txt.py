@@ -20,6 +20,52 @@ from dataclasses import dataclass, field
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "90 томов Толстого")
 DATA_DIR = os.path.abspath(DATA_DIR)
 
+# Тома с детальной структурой (письма/дневники)
+# Письма: тома 59-90 (32 тома)
+# Дневники: тома 48, 49, 52, 53, 54, 58
+STRUCTURED_VOLUMES = {
+    # Дневники
+    48: "дневник",
+    49: "дневник",
+    52: "дневник",
+    53: "дневник",
+    54: "дневник",
+    58: "дневник",
+    # Письма
+    59: "письмо",
+    60: "письмо",
+    61: "письмо",
+    62: "письмо",
+    63: "письмо",
+    64: "письмо",
+    65: "письмо",
+    66: "письмо",
+    67: "письмо",
+    68: "письмо",
+    69: "письмо",
+    70: "письмо",
+    71: "письмо",
+    72: "письмо",
+    73: "письмо",
+    74: "письмо",
+    75: "письмо",
+    76: "письмо",
+    77: "письмо",
+    78: "письмо",
+    79: "письмо",
+    80: "письмо",
+    81: "письмо",
+    82: "письмо",
+    83: "письмо",
+    84: "письмо",
+    85: "письмо",
+    86: "письмо",
+    87: "письмо",
+    88: "письмо",
+    89: "письмо",
+    90: "письмо",
+}
+
 
 # ---------------------------------------------------------------------------
 # Разбор HTML секции
@@ -115,6 +161,13 @@ class Record:
     title: str = ""  # название тома из EPUB
     rtype: str = ""  # тип: проза, письма, дневники
     paragraphs: list[str] = field(default_factory=list)
+    # Дополнительные поля для писем/дневников
+    year: str = ""   # год (для писем/дневников)
+    num: str = ""    # номер письма
+    to: str = ""     # адресат письма или название раздела дневника
+    date: str = ""   # дата из <em> в p.drop
+    note: str = ""   # примечание (например, "перевод с французского")
+    entry_title: str = ""  # полное название записи из TOC (для поиска и отображения)
 
 
 def _find_section_file(zf: zipfile.ZipFile, src: str, names: dict[str, str]) -> str | None:
@@ -132,7 +185,63 @@ def _find_section_file(zf: zipfile.ZipFile, src: str, names: dict[str, str]) -> 
     return None
 
 
+def _is_editorial_content(text: str) -> bool:
+    """
+    Определяет, является ли параграф редакторским комментарием.
+
+    Признаки редакторских комментариев:
+    - Начинается с цифры и буквы (сноски: "1Письмо это не сохранилось")
+    - Начинается с "Впервые опубликовано", "Отрывок напечатан", "Датируется"
+    - Упоминает издания, публикации, редакторов
+    - Биографические справки (упоминает годы жизни в скобках)
+    """
+    text = text.strip()
+
+    # Пустой или очень короткий — пропускаем
+    if len(text) < 10:
+        return True
+
+    # Начинается с цифры и буквы — сноска (1Письмо, 2В 1856, 3В. И.)
+    if re.match(r'^\d+[А-Яа-яA-Za-z]', text):
+        return True
+
+    # Редакторские маркеры
+    editorial_markers = [
+        'Впервые опубликовано',
+        'Отрывок напечатан',
+        'Датируется',
+        'Автограф',
+        'Печатается по',
+        'Год определяется',
+        'На четвертой странице:',
+        'Адресовано:',
+        'Письмо это не сохранилось',
+        'См. т.',
+        'см. т.',
+    ]
+
+    for marker in editorial_markers:
+        if text.startswith(marker):
+            return True
+
+    # Биографические справки (годы жизни в скобках)
+    if re.search(r'\(\d{4}—\d{4}\)', text):
+        return True
+
+    return False
+
+
 def parse_volume(epub_path: str, vol: int) -> list[Record]:
+    """
+    Парсинг структурированного тома (письма/дневники) с поддержкой якорей.
+
+    Для писем: несколько сотен записей в одном HTML-файле, разделены якорями.
+    Используем BeautifulSoup для извлечения содержимого между якорями.
+
+    Для дневников: каждая запись в отдельном файле, читаем целиком.
+    """
+    from bs4 import BeautifulSoup
+
     rtype = STRUCTURED_VOLUMES[vol]
     records: list[Record] = []
 
@@ -144,39 +253,109 @@ def parse_volume(epub_path: str, vol: int) -> list[Record]:
             return records
         toc = zf.read(toc_name).decode("utf-8-sig", errors="replace")
 
+        # Группируем записи по файлам: {src_file: [(label, src_full, year), ...]}
+        entries_by_file = {}
         current_year = ""
-        for label_raw, src in _NAVPOINT_RE.findall(toc):
-            label = html.unescape(label_raw).replace(" ", " ").strip()
 
+        for label_raw, src in _NAVPOINT_RE.findall(toc):
+            label = html.unescape(label_raw).replace(" ", " ").strip()
+
+            # Обработка года
             if _YEAR_RE.match(label):
                 current_year = label
                 if rtype == "письмо":
-                    # для писем год-заголовок содержания не несёт текста — пропускаем
-                    continue
-                # для дневников год = отдельный файл с текстом за год -> читаем ниже
-                num, to, note = "", "", ""
-            else:
-                m = _LETTER_RE.match(label)
-                if rtype == "письмо":
-                    if not m:
-                        continue  # не письмо (обложка, лицензия и т.п.)
-                    num, to, note = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
-                else:
-                    # дневник: именованный раздел ("Дневник помещика")
-                    num, to, note = "", label, ""
+                    continue  # для писем год-заголовок не несёт текста
 
-            section_file = _find_section_file(zf, src, names)
+            # Парсим письмо/дневник
+            m = _LETTER_RE.match(label)
+            if rtype == "письмо":
+                if not m:
+                    continue  # не письмо (обложка и т.п.)
+                num, to, note = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
+            else:
+                # дневник
+                num, to, note = "", label, ""
+
+            # Группируем по файлам
+            src_file = src.split('#')[0]
+            if src_file not in entries_by_file:
+                entries_by_file[src_file] = []
+
+            entries_by_file[src_file].append({
+                'label': label,
+                'src': src,
+                'year': current_year,
+                'num': num,
+                'to': to,
+                'note': note,
+            })
+
+        # Обрабатываем каждый файл
+        for src_file, entries in entries_by_file.items():
+            section_file = _find_section_file(zf, src_file, names)
             if not section_file:
                 continue
-            section_html = zf.read(section_file).decode("utf-8-sig", errors="replace")
-            paragraphs, date = _extract_paragraphs(section_html)
-            if not paragraphs:
-                continue
 
-            records.append(Record(
-                vol=vol, rtype=rtype, year=current_year,
-                num=num, to=to, date=date, note=note, paragraphs=paragraphs,
-            ))
+            html_content = zf.read(section_file).decode("utf-8-sig", errors="replace")
+
+            # Если один entry без якоря — читаем весь файл (дневники)
+            if len(entries) == 1 and '#' not in entries[0]['src']:
+                entry = entries[0]
+                paragraphs, date = _extract_paragraphs(html_content)
+                if paragraphs:
+                    records.append(Record(
+                        vol=vol, rtype=rtype, year=entry['year'],
+                        num=entry['num'], to=entry['to'], date=date, note=entry['note'],
+                        entry_title=entry['label'], paragraphs=paragraphs,
+                    ))
+            else:
+                # Парсим через BeautifulSoup для извлечения по якорям
+                soup = BeautifulSoup(html_content, 'html.parser')
+
+                for entry in entries:
+                    anchor = entry['src'].split('#')[1] if '#' in entry['src'] else None
+                    if not anchor:
+                        continue
+
+                    # Ищем элемент с этим id
+                    elem = soup.find(id=anchor)
+                    if not elem:
+                        continue
+
+                    # Извлекаем параграфы до следующего <h3>
+                    paragraphs = []
+                    date = ""
+
+                    for sibling in elem.find_all_next():
+                        # Остановка на следующем заголовке
+                        if sibling.name == 'h3' and sibling != elem:
+                            break
+
+                        # Извлекаем параграфы
+                        if sibling.name == 'p':
+                            text = _clean_text(str(sibling))
+                            if not text:
+                                continue
+
+                            # Остановка на редакторских комментариях
+                            if _is_editorial_content(text):
+                                break
+
+                            paragraphs.append(text)
+
+                            # Извлекаем дату из первого параграфа
+                            if not date and len(paragraphs) == 1:
+                                date_match = re.search(r'\d{4}\s*г\..*?\.', paragraphs[0])
+                                if date_match:
+                                    date = date_match.group(0)
+
+                    if paragraphs:
+                        records.append(Record(
+                            vol=vol, rtype=rtype, year=entry['year'],
+                            num=entry['num'], to=entry['to'], date=date, note=entry['note'],
+                            entry_title=entry['label'], paragraphs=paragraphs,
+                        ))
+
     return records
 
 
@@ -234,6 +413,24 @@ def write_txt(records: list[Record], out_path: str) -> None:
                 parts.append(f"title={title_safe}")
             if r.rtype:
                 parts.append(f"type={r.rtype}")
+            # Дополнительные поля для писем/дневников
+            if r.year:
+                parts.append(f"year={r.year}")
+            if r.num:
+                parts.append(f"num={r.num}")
+            if r.to:
+                # Экранируем | в адресате
+                to_safe = r.to.replace("|", "/")
+                parts.append(f"to={to_safe}")
+            if r.date:
+                parts.append(f"date={r.date}")
+            if r.note:
+                note_safe = r.note.replace("|", "/")
+                parts.append(f"note={note_safe}")
+            if r.entry_title:
+                # Полное название записи из TOC (для поиска и отображения)
+                entry_safe = r.entry_title.replace("|", "/")
+                parts.append(f"entry={entry_safe}")
 
             f.write("### META | " + " | ".join(parts) + "\n")
             f.write("\n\n".join(r.paragraphs))
@@ -270,8 +467,11 @@ def main() -> int:
 
     total = 0
     for vol, path in epubs:
-        # Парсим все тома одинаково — извлекаем текст + метаданные
-        records = parse_prose_volume(path, vol)
+        # Выбор парсера в зависимости от типа тома
+        if vol in STRUCTURED_VOLUMES:
+            records = parse_volume(path, vol)
+        else:
+            records = parse_prose_volume(path, vol)
 
         # Упрощённые имена файлов: tom01.txt, tom02.txt, ...
         out_name = f"tom{vol:02d}.txt"

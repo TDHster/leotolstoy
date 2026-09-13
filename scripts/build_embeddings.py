@@ -17,6 +17,10 @@ import sys
 import time
 
 import numpy as np
+from dotenv import load_dotenv
+
+# Загрузка .env для чтения EMBED_TYPES
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from corpus import load_chunks, source_label  # noqa: E402

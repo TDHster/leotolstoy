@@ -14,6 +14,8 @@ dependencies = [
     "python-dotenv>=1.0,<2.0",
     # rate limiting (защита от абьюза и брутфорса)
     "slowapi>=0.1.9,<0.2",
+    # Парсинг HTML (для EPUB → txt конвертации)
+    "beautifulsoup4>=4.12,<5.0",
 ]
 
 [dependency-groups]

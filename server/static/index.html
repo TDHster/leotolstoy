@@ -89,6 +89,19 @@
     text-align: center;
     margin-top: -4px;
   }
+  .llm-info {
+    font-size: 11px;
+    color: var(--muted);
+    width: 100%;
+    text-align: center;
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+  .llm-info strong {
+    color: var(--ink);
+    font-weight: 500;
+  }
 
   #chat { max-width:760px; margin:0 auto; padding:16px; }
   .msg { margin:14px 0; display:flex; }
@@ -132,6 +145,7 @@
   <div class="toggle-switch" id="modelToggle" title="Переключить модель эмбеддингов"></div>
   <span id="model2Label">Qwen3-8B</span>
   <div class="model-info" id="modelInfo">загрузка...</div>
+  <div class="llm-info" id="llmInfo">Генерация: <strong id="llmModel">загрузка...</strong></div>
 </div>
 
 <div id="chat">
@@ -190,6 +204,25 @@ async function loadModels() {
     }
   } catch (e) {
     console.error('Error loading models:', e);
+  }
+}
+
+// Загрузка конфигурации LLM
+async function loadLLMConfig() {
+  try {
+    const r = await fetch('/config');
+    if (!r.ok) {
+      console.error('Failed to load config:', r.status);
+      return;
+    }
+    const data = await r.json();
+    const llmModelEl = document.getElementById('llmModel');
+    if (llmModelEl && data.llm_model) {
+      llmModelEl.textContent = data.llm_model;
+    }
+  } catch (e) {
+    console.error('Error loading LLM config:', e);
+    document.getElementById('llmModel').textContent = 'неизвестно';
   }
 }
 
@@ -305,8 +338,9 @@ input.addEventListener('keydown', e => {
   }
 });
 
-// Загружаем модели при старте
+// Загружаем модели и конфиг при старте
 loadModels();
+loadLLMConfig();
 </script>
 </body>
 </html>

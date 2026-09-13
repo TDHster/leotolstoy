@@ -97,7 +97,13 @@ class Retriever:
         """
         # Квантизация query если индекс квантизован
         if self.is_quantized:
-            query_vec_search = (query_vec * 127).astype(np.int8)
+            query_vec_int8 = (query_vec * 127).astype(np.int8)
+            # Перенормализация после квантизации (чтобы норма была ровно 127)
+            norm_int8 = np.linalg.norm(query_vec_int8.astype(np.float32))
+            if norm_int8 > 0:
+                query_vec_search = (query_vec_int8.astype(np.float32) / norm_int8 * 127).astype(np.int8)
+            else:
+                query_vec_search = query_vec_int8
         else:
             query_vec_search = query_vec
 

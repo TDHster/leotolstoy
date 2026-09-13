@@ -26,6 +26,10 @@ convert:
 # Только письма:  make embeddings EMBED_TYPES=письмо
 embeddings:
 	uv run python scripts/build_embeddings.py
+	@if command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
+		echo "🔄 Перезапуск Docker контейнеров..."; \
+		docker compose restart; \
+	fi
 
 # GPU-версия (требует: uv pip install sentence-transformers torch)
 embeddings-gpu:
@@ -34,6 +38,10 @@ embeddings-gpu:
 # API-версия (требует EXTERNAL_EMBEDDER_API_KEY в .env)
 embeddings-qwen:
 	uv run python scripts/build_embeddings_api.py
+	@if command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
+		echo "🔄 Перезапуск Docker контейнеров..."; \
+		docker compose restart; \
+	fi
 
 run:
 	uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 1

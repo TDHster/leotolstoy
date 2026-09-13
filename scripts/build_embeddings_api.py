@@ -116,9 +116,19 @@ def main() -> int:
     print(f"\nГотово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с). Форма: {vectors.shape}")
 
     # Квантизация float32 → int8 (4× экономия памяти, минимальная потеря качества)
+    # ВАЖНО: после квантизации нужно заново нормализовать, чтобы норма int8 векторов была ровно 127
     print(f"\nКвантизация векторов: float32 → int8 (экономия RAM: 4×)")
     vectors_int8 = (vectors * 127).astype(np.int8)
+
+    # Перенормализация int8 векторов (чтобы норма была ровно 127, а не ~106)
+    norms_int8 = np.linalg.norm(vectors_int8.astype(np.float32), axis=1, keepdims=True)
+    norms_int8[norms_int8 == 0] = 1.0
+    vectors_int8 = (vectors_int8.astype(np.float32) / norms_int8 * 127).astype(np.int8)
+
+    # Проверка
+    sample_norm = np.linalg.norm(vectors_int8[0].astype(np.float32))
     print(f"  Форма int8: {vectors_int8.shape}, размер: {vectors_int8.nbytes / 1e6:.1f} МБ")
+    print(f"  Норма после квантизации: {sample_norm:.1f} (ожидается ~127)")
 
     # Оценка стоимости (приблизительная, ~250 токенов на чанк)
     est_tokens = len(texts) * 250

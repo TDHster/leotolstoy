@@ -98,6 +98,13 @@ MAX_LOADED_INDICES = 1  # максимум индексов в памяти од
 
 def _get_index_dir(model_id: str) -> str:
     """Маппинг model_id → каталог индекса."""
+    # Если задан INDEX_DIR в окружении — используем его
+    index_dir_env = os.environ.get("INDEX_DIR")
+    if index_dir_env:
+        root = os.path.join(os.path.dirname(__file__), "..")
+        return os.path.join(root, index_dir_env)
+
+    # Иначе — дефолтные пути по model_id
     if model_id == "local":
         return os.path.join(os.path.dirname(__file__), "..", "index")
     # Для внешних моделей: index.<model_id>/
@@ -258,6 +265,15 @@ async def list_models(_user: str = Depends(auth)):
     available.sort(key=lambda m: (m["id"] != "local", m["id"]))
 
     return {"models": available}
+
+
+@app.get("/config")
+async def get_config(_user: str = Depends(auth)):
+    """Конфигурация сервера (LLM модель и т.д.)."""
+    return {
+        "llm_model": LLM_MODEL,
+        "llm_provider": LLM_BASE_URL,
+    }
 
 
 @app.post("/chat", response_model=ChatOut)
