@@ -52,7 +52,6 @@ def main() -> int:
     texts = [c.text for c in chunks]
 
     print(f"Эмбеддинг {len(texts)} чанков моделью {MODEL_NAME}...")
-    print("Обработка батчами по 64 чанка (внутри по 8)...")
     sys.stdout.flush()
     t0 = time.time()
 
@@ -71,7 +70,15 @@ def main() -> int:
         rate = processed / elapsed if elapsed > 0 else 0
         eta = (len(texts) - processed) / rate if rate > 0 else 0
 
-        print(f"  [{processed}/{len(texts)}] {pct:.1f}% | {rate:.1f} чанков/с | ETA: {eta/60:.1f} мин", flush=True)
+        # прогресс-бар в стиле build_embeddings_api.py
+        bar_width = 40
+        filled = int(bar_width * processed / len(texts))
+        bar = '█' * filled + '░' * (bar_width - filled)
+        eta_min = eta / 60
+        print(f"\r[{bar}] {pct:.1f}% | {processed}/{len(texts)} | "
+              f"{rate:.1f} чанков/с | ETA: {eta_min:.1f} мин", end='', flush=True)
+
+    print()  # новая строка после прогресс-бара
 
     vectors = np.vstack(all_vectors)
     dt = time.time() - t0

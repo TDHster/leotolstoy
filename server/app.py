@@ -222,6 +222,21 @@ def build_context(results: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+def _display_name(model_id: str, meta: dict) -> str:
+    """Имя модели для UI.
+
+    Локальная модель берётся из конфига (EMBED_MODEL в .env) — честное имя
+    модели без префикса sentence-transformers/, а не захардкоженная подпись
+    из metadata. Для внешних моделей — display_name из metadata индекса.
+    """
+    if model_id == "local":
+        model = os.environ.get("EMBED_MODEL") or meta.get("model") or ""
+        if model:
+            return model.split("/")[-1]
+        return "Локальная модель"
+    return meta.get("display_name", model_id)
+
+
 @app.get("/models")
 async def list_models(_user: str = Depends(auth)):
     """Список доступных моделей эмбеддингов с их характеристиками."""
@@ -250,7 +265,7 @@ async def list_models(_user: str = Depends(auth)):
                 model_id = dir_name.replace("index.", "")
 
             # Формируем описание для UI
-            display_name = meta.get("display_name", model_id)
+            display_name = _display_name(model_id, meta)
             dims = meta.get("dimensions", 0)
             is_api = meta.get("api", False)
             latency_ms = meta.get("latency_ms", 50 if not is_api else 350)

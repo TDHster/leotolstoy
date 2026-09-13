@@ -54,3 +54,24 @@ def test_chat_missing_body(client):
 def test_favicon_no_auth(client):
     # без файла отдаёт 204, с файлом 200 — оба без авторизации (не 401)
     assert client.get("/favicon.ico").status_code in (200, 204)
+
+
+def test_display_name_local_from_env(client, monkeypatch):
+    """Имя локальной модели в UI берётся из конфига (EMBED_MODEL), а не из metadata."""
+    app = client._app_module
+
+    monkeypatch.setenv(
+        "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+    assert app._display_name("local", {}) == "paraphrase-multilingual-MiniLM-L12-v2"
+
+    # без env — fallback на model из metadata
+    monkeypatch.delenv("EMBED_MODEL")
+    assert (
+        app._display_name("local", {"model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"})
+        == "paraphrase-multilingual-MiniLM-L12-v2"
+    )
+    assert app._display_name("local", {}) == "Локальная модель"
+
+    # внешние модели — как раньше, из display_name
+    assert app._display_name("qwen3-embedding-8b", {"display_name": "Qwen3 Embedding 8B"}) == "Qwen3 Embedding 8B"
