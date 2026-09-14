@@ -53,17 +53,27 @@ class Retriever:
                 "dtype": "float32",
             }
 
-        # Загрузка векторов с учётом квантизации
+        # Загрузка векторов с учётом dtype из metadata
         self.vectors: np.ndarray = np.load(vec_path)
-        self.is_quantized = self.metadata.get("quantized", False)
         self.dtype = self.metadata.get("dtype", "float32")
+
+        # Сверка фактического dtype с metadata: подменённый или недособранный
+        # файл не должен молча ломать поиск (int8-файл как float32 → скоры
+        # сжимаются в ~127 раз и т.п.)
+        if self.vectors.dtype != np.dtype(self.dtype):
+            raise ValueError(
+                f"vectors.npy имеет dtype {self.vectors.dtype}, а metadata.json — "
+                f"{self.dtype}. Файл подменён или индекс недособран. Пересоберите индекс."
+            )
+        self.is_quantized = self.dtype == "int8"  # атрибут для совместимости (тесты/легаси)
 
         if self.is_quantized:
             log.info("Загружен квантизованный индекс (%s)", self.dtype)
             # Векторы уже int8, ничего не делаем
         else:
-            # float32 векторы
-            self.vectors = self.vectors.astype(np.float32)
+            # float32/float16 — оставляем как есть (float16 НЕ кастим целиком
+            # в float32: это удвоило бы RAM на сервере)
+            log.info("Загружен индекс (%s)", self.dtype)
 
         # Обновить dimensions в metadata если она была дефолтной
         if "dimensions" not in self.metadata or self.metadata["dimensions"] == 384:
@@ -82,6 +92,7 @@ class Retriever:
                 f"Размерность vectors.npy ({self.vectors.shape[1]}) не совпадает "
                 f"с metadata.json ({expected_dim}). Пересоберите индекс."
             )
+        self._validate_vectors()
 
         log.info(
             "Загружен индекс: %s (%d чанков, %d dims, модель: %s, dtype: %s, RAM: %.1f МБ)",
@@ -93,15 +104,52 @@ class Retriever:
             self.vectors.nbytes / 1e6,
         )
 
+    def _blockwise_dot(self, q: np.ndarray) -> np.ndarray:
+        """index @ q блоками — для int8/float16 индексов.
+
+        numpy не умножает int8/float16 через быстрый BLAS, а полный cast индекса
+        в float32 (87K×4096 ≈ 1.4 ГБ) не влезает в RAM — поэтому блоками.
+        """
+        scores = np.empty(self.vectors.shape[0], dtype=np.float32)
+        for start in range(0, self.vectors.shape[0], _INT8_SEARCH_BLOCK):
+            end = min(start + _INT8_SEARCH_BLOCK, self.vectors.shape[0])
+            scores[start:end] = self.vectors[start:end].astype(np.float32) @ q
+        return scores
+
+    def _validate_vectors(self) -> None:
+        """Проверка индекса на повреждённые векторы (NaN/inf/нулевые строки).
+
+        int8-файлы пропускаем: NaN в int8 не хранится (при касте превращается
+        в мусор, но сам NaN-сигнал теряется). Блочно — чтобы не аллоцировать
+        N×dim float32 целиком.
+        """
+        if self.vectors.dtype == np.int8:
+            return
+        bad = 0
+        for start in range(0, self.vectors.shape[0], _INT8_SEARCH_BLOCK):
+            end = min(start + _INT8_SEARCH_BLOCK, self.vectors.shape[0])
+            block = self.vectors[start:end].astype(np.float32)
+            bad += int((~np.isfinite(block).all(axis=1) | ~(block != 0).any(axis=1)).sum())
+        if bad:
+            raise ValueError(
+                f"Индекс содержит {bad} повреждённых векторов (NaN/inf/нулевые "
+                f"строки). Пересоберите индекс."
+            )
+
     def search(self, query_vec: np.ndarray, top_k: int = 5,
                types: set[str] | None = None) -> list[dict]:
         """
         query_vec — L2-нормализованный вектор запроса (EMBED_DIM,), float32.
 
-        Если индекс квантизован (int8), конвертируем query_vec в int8 для поиска.
+        int8-индекс: запрос квантизуется той же схемой, что и сборка.
+        float16/float32-индекс: ищется как есть (нормы ≈ 1 → dot ≈ cosine).
         """
-        # Квантизация query если индекс квантизован
-        if self.is_quantized:
+        if not np.isfinite(query_vec).all():
+            log.warning("Вектор запроса содержит NaN/inf — поиск пропущен")
+            return []
+
+        # Квантизация query если индекс int8 (легаси-путь)
+        if self.dtype == "int8":
             query_vec_int8 = (query_vec * 127).astype(np.int8)
             # Перенормализация после квантизации (чтобы норма была ровно 127)
             norm_int8 = np.linalg.norm(query_vec_int8.astype(np.float32))
@@ -110,20 +158,17 @@ class Retriever:
             else:
                 query_vec_search = query_vec_int8
         else:
-            query_vec_search = query_vec
+            query_vec_search = query_vec.astype(np.float32)
 
         # косинус = скалярное произведение (обе стороны нормализованы)
-        if self.is_quantized:
+        if self.dtype == "int8":
             # int8 @ int8 в numpy переполняется (dtype результата не расширяется),
-            # поэтому считаем в float32. Блоками — чтобы не аллоцировать
-            # N×dim float32 (~320 МБ) целиком на каждый запрос.
-            q = query_vec_search.astype(np.float32)
-            scores = np.empty(self.vectors.shape[0], dtype=np.float32)
-            for start in range(0, self.vectors.shape[0], _INT8_SEARCH_BLOCK):
-                end = min(start + _INT8_SEARCH_BLOCK, self.vectors.shape[0])
-                scores[start:end] = self.vectors[start:end].astype(np.float32) @ q
+            # поэтому считаем в float32 блоками
+            scores = self._blockwise_dot(query_vec_search.astype(np.float32))
             # int8-векторы перенормированы до нормы 127 → косинус = dot / 127²
             scores /= 127 * 127
+        elif self.dtype == "float16":
+            scores = self._blockwise_dot(query_vec_search)
         else:
             scores = self.vectors @ query_vec_search
 
@@ -174,9 +219,23 @@ class Retriever:
                     f"Задайте EXTERNAL_EMBEDDER_API_KEY в .env"
                 )
             base_url = os.environ.get("EXTERNAL_EMBEDDER_ENDPOINT", "https://openrouter.ai/api/v1")
-            embedder = OpenRouterEmbedder(model=model, api_key=api_key, base_url=base_url)
-            # Хак: устанавливаем размерность из metadata, чтобы не делать лишний вызов API
+            # Пин провайдера: дефолт nebius (неквантизованный апстрим Qwen3-8B).
+            # Пустая строка = авто-роутинг (не рекомендуется — провайдеры могут
+            # квантизовать модель по-разному, векторы несравнимы).
+            provider = os.environ.get("EXTERNAL_EMBEDDER_PROVIDER", "nebius").strip() or None
+            embedder = OpenRouterEmbedder(
+                model=model, api_key=api_key, base_url=base_url, provider=provider
+            )
+            # Размерность из metadata вместо лишнего вызова API; _call_api сверяет
+            # фактическую размерность ответа с ней (защита от подмены модели)
             embedder._dimensions = self.metadata["dimensions"]
+            meta_provider = self.metadata.get("provider")
+            if provider and meta_provider and str(meta_provider).lower() != provider.lower():
+                log.warning(
+                    "Рантайм-провайдер '%s' отличается от провайдера сборки индекса "
+                    "'%s' — векторы запроса и индекса могут быть несовместимы",
+                    provider, meta_provider,
+                )
             return embedder
         else:
             # Локальная ONNX модель

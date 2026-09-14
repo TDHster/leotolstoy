@@ -41,16 +41,47 @@ def _checkpoint_paths(index_dir: str) -> tuple[str, str]:
     )
 
 
-def save_checkpoint(index_dir: str, processed: int, total: int, vectors: np.ndarray) -> None:
-    """Сохранить промежуточный результат, чтобы перезапуск не начинался с нуля."""
+def save_checkpoint(
+    index_dir: str,
+    processed: int,
+    total: int,
+    vectors: np.ndarray,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+    n_batches: int | None = None,
+) -> None:
+    """Сохранить промежуточный результат, чтобы перезапуск не начинался с нуля.
+
+    В meta пишется fingerprint сборки (model/provider/dims): resume допустим
+    только при полном совпадении, иначе векторы от разных провайдеров/моделей
+    смешались бы в одном индексе.
+    """
     vec_path, meta_path = _checkpoint_paths(index_dir)
     np.save(vec_path, vectors)
+    meta: dict = {"processed": processed, "total": total, "dims": int(vectors.shape[1])}
+    if model:
+        meta["model"] = model
+    if provider:
+        meta["provider"] = provider.lower()
+    if n_batches is not None:
+        meta["n_batches"] = n_batches
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"processed": processed, "total": total}, f)
+        json.dump(meta, f)
 
 
-def load_checkpoint(index_dir: str, total: int) -> np.ndarray | None:
-    """Вернуть промежуточные векторы, если чекпоинт валиден (тот же корпус)."""
+def load_checkpoint(
+    index_dir: str,
+    total: int,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+) -> np.ndarray | None:
+    """Вернуть промежуточные векторы, если чекпоинт валиден.
+
+    Валидность: тот же корпус (total), та же модель и провайдер (fingerprint).
+    Оба поля пустые с обеих сторон = легаси-чекпоинт без пина, принимаем.
+    """
     vec_path, meta_path = _checkpoint_paths(index_dir)
     if not (os.path.exists(vec_path) and os.path.exists(meta_path)):
         return None
@@ -59,12 +90,33 @@ def load_checkpoint(index_dir: str, total: int) -> np.ndarray | None:
             meta = json.load(f)
         if meta.get("total") != total:
             return None
+        if model and meta.get("model") and meta["model"] != model:
+            return None
+        if (provider or "").lower() != (meta.get("provider") or "").lower():
+            return None
         vecs = np.load(vec_path)
         if vecs.ndim != 2 or vecs.shape[0] > total or vecs.shape[0] != meta.get("processed"):
+            return None
+        if meta.get("dims") and vecs.shape[1] != meta["dims"]:
             return None
         return vecs
     except (ValueError, OSError, json.JSONDecodeError):
         return None
+
+
+def _validate_batch(vecs: np.ndarray, expected_dims: int | None = None) -> None:
+    """Проверить ответ API: конечность, отсутствие нулевых строк, стабильность dims.
+
+    NaN-вектор при касте в int8 превращается в мусор (или вектор-константу,
+    который «притягивается» к любым запросам) — фейлим громко, а не молча.
+    """
+    if not np.isfinite(vecs).all() or np.any(np.all(vecs == 0, axis=1)):
+        raise RuntimeError("API вернул NaN/inf или нулевые векторы — ответ провайдера повреждён")
+    if expected_dims is not None and vecs.shape[1] != expected_dims:
+        raise RuntimeError(
+            f"Размерность векторов сменилась ({expected_dims} -> {vecs.shape[1]}) — "
+            f"провайдер нестабилен или подменил модель"
+        )
 
 
 def clear_checkpoint(index_dir: str) -> None:
@@ -79,6 +131,11 @@ def main() -> int:
     model = os.environ.get("EXTERNAL_EMBEDDER_MODEL", "qwen/qwen3-embedding-8b")
     api_key = os.environ.get("EXTERNAL_EMBEDDER_API_KEY")
     base_url = os.environ.get("EXTERNAL_EMBEDDER_ENDPOINT", "https://openrouter.ai/api/v1")
+    # Пин провайдера: дефолт nebius (неквантизованный апстрим Qwen3-8B).
+    # Для qwen3-embedding-4b единственный провайдер — deepinfra.
+    # Пустая строка = авто-роутинг (НЕ рекомендуется: батчи разъедутся по
+    # провайдерам, а один из них (siliconflow) квантизует модель в fp8).
+    provider = os.environ.get("EXTERNAL_EMBEDDER_PROVIDER", "nebius").strip() or None
 
     if not api_key:
         print("ERROR: EXTERNAL_EMBEDDER_API_KEY не задан в .env", file=sys.stderr)
@@ -113,12 +170,14 @@ def main() -> int:
 
     print(f"\nЭмбеддинг {len(texts)} чанков через {model}...")
     print(f"API: {base_url}")
+    print(f"Провайдер: {provider or 'авто (НЕ РЕКОМЕНДУЕТСЯ)'}")
     sys.stdout.flush()
 
     # Таймаут 120с: батч из 100 текстов (~25k токенов) под нагрузкой OpenRouter
     # может думать дольше 30с. 5 попыток с экспоненциальным backoff.
     embedder = OpenRouterEmbedder(
-        model=model, api_key=api_key, base_url=base_url, timeout=120.0, max_retries=5
+        model=model, api_key=api_key, base_url=base_url, timeout=120.0, max_retries=5,
+        provider=provider,
     )
 
     t0 = time.time()
@@ -128,7 +187,7 @@ def main() -> int:
     all_vecs = []
 
     # Возобновление с чекпоинта (если прошлый запуск упал) — не начинаем с нуля
-    resume = load_checkpoint(index_dir, len(texts))
+    resume = load_checkpoint(index_dir, len(texts), model=model, provider=provider)
     if resume is not None and resume.shape[0] > 0:
         print(f"Найден чекпоинт: {resume.shape[0]}/{len(texts)} чанков уже готово — "
               f"продолжаем с этого места")
@@ -136,6 +195,13 @@ def main() -> int:
         start = resume.shape[0]
         batches_done = resume.shape[0] // batch_size
     else:
+        # Чекпоинт отклонён (модель/провайдер/корпус изменились) или отсутствует.
+        # Подчистим, чтобы устаревший чекпоинт не всплыл позже.
+        vec_path, _ = _checkpoint_paths(index_dir)
+        if os.path.exists(vec_path):
+            print("Чекпоинт отклонён (модель/провайдер/корпус изменились) — "
+                  "начинаем заново")
+        clear_checkpoint(index_dir)
         start = 0
         batches_done = 0
 
@@ -143,6 +209,7 @@ def main() -> int:
         for i in range(start, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             batch_vecs = embedder._call_api(batch)
+            _validate_batch(batch_vecs, expected_dims=all_vecs[0].shape[1] if all_vecs else None)
             all_vecs.append(batch_vecs)
             batches_done += 1
 
@@ -156,7 +223,10 @@ def main() -> int:
 
             # Чекпоинт каждые N батчей — при обрыве продолжаем с места обрыва
             if batches_done % CHECKPOINT_EVERY_BATCHES == 0:
-                save_checkpoint(index_dir, processed, len(texts), np.vstack(all_vecs))
+                save_checkpoint(
+                    index_dir, processed, len(texts), np.vstack(all_vecs),
+                    model=model, provider=provider, n_batches=batches_done,
+                )
 
             # Прогресс-бар
             bar_width = 40
@@ -185,20 +255,34 @@ def main() -> int:
     dt = time.time() - t0
     print(f"\nГотово за {dt:.1f}с ({len(texts)/dt:.1f} чанков/с). Форма: {vectors.shape}")
 
-    # Квантизация float32 → int8 (4× экономия памяти, минимальная потеря качества)
-    # ВАЖНО: после квантизации нужно заново нормализовать, чтобы норма int8 векторов была ровно 127
-    print(f"\nКвантизация векторов: float32 → int8 (экономия RAM: 4×)")
-    vectors_int8 = (vectors * 127).astype(np.int8)
+    # Формат индекса: float32 по умолчанию (точная точность, поиск через BLAS;
+    # на сервере 4 ГБ RAM индекс ~1.4 ГБ влезает с запасом).
+    # float16 — опция экономии (716 МБ, качество ≈ float32).
+    # int8 больше НЕ используется: усечение (не округление) обнуляло ~39%
+    # компонент и давало ~40% расхождений top-10 с float32.
+    index_dtype = os.environ.get("EMBED_INDEX_DTYPE", "float32").strip()
+    if index_dtype == "float32":
+        vectors_out = vectors
+    elif index_dtype == "float16":
+        vectors_out = vectors.astype(np.float16)
+    elif index_dtype == "int8":
+        # Легаси-вариант (совместим с int8-путём поиска в retriever — та же
+        # схема усечения и перенормировки, менять нельзя без синхронного
+        # изменения рантайма)
+        print(f"\nВНИМАНИЕ: int8-индекс искажает ранжирование — используйте float32")
+        vectors_int8 = (vectors * 127).astype(np.int8)
+        norms_int8 = np.linalg.norm(vectors_int8.astype(np.float32), axis=1, keepdims=True)
+        norms_int8[norms_int8 == 0] = 1.0
+        vectors_out = (vectors_int8.astype(np.float32) / norms_int8 * 127).astype(np.int8)
+    else:
+        print(f"ERROR: EMBED_INDEX_DTYPE={index_dtype} — допустимы только "
+              f"float32, float16 или int8", file=sys.stderr)
+        return 1
 
-    # Перенормализация int8 векторов (чтобы норма была ровно 127, а не ~106)
-    norms_int8 = np.linalg.norm(vectors_int8.astype(np.float32), axis=1, keepdims=True)
-    norms_int8[norms_int8 == 0] = 1.0
-    vectors_int8 = (vectors_int8.astype(np.float32) / norms_int8 * 127).astype(np.int8)
-
-    # Проверка
-    sample_norm = np.linalg.norm(vectors_int8[0].astype(np.float32))
-    print(f"  Форма int8: {vectors_int8.shape}, размер: {vectors_int8.nbytes / 1e6:.1f} МБ")
-    print(f"  Норма после квантизации: {sample_norm:.1f} (ожидается ~127)")
+    print(f"\nФормат индекса: {index_dtype}")
+    sample_norm = np.linalg.norm(vectors_out[0].astype(np.float32))
+    print(f"  Форма: {vectors_out.shape}, размер: {vectors_out.nbytes / 1e6:.1f} МБ, "
+          f"норма[0]: {sample_norm:.4f}")
 
     # Оценка стоимости (приблизительная, ~250 токенов на чанк)
     est_tokens = len(texts) * 250
@@ -212,17 +296,22 @@ def main() -> int:
     est_cost = (est_tokens / 1_000_000) * est_cost_per_1m
     print(f"Оценка: ~{est_tokens:,} токенов, ~${est_cost:.2f} ({model})")
 
-    # Сохранение vectors.npy (int8 для экономии памяти)
+    # Сохранение vectors.npy (атомарно: tmp + os.replace — при падении между
+    # записями vectors.npy и metadata.json старый файл остаётся целым).
+    # ВАЖНО: tmp-имя должно заканчиваться на .npy, иначе np.save допишет
+    # расширение сам и os.replace не найдёт файл.
     vectors_path = os.path.join(index_dir, "vectors.npy")
-    np.save(vectors_path, vectors_int8)
+    tmp_vec_path = os.path.join(index_dir, "vectors.tmp.npy")
+    np.save(tmp_vec_path, vectors_out)
+    os.replace(tmp_vec_path, vectors_path)
+    print(f"\nСохранено: vectors.npy ({index_dtype}) {os.path.getsize(vectors_path) / 1e6:.1f} МБ")
 
-    # Также сохраним float32 версию для сравнения (опционально, можно удалить потом)
-    vectors_f32_path = os.path.join(index_dir, "vectors_float32.npy")
-    np.save(vectors_f32_path, vectors)
-    print(f"\nСохранены две версии векторов:")
-    print(f"  vectors.npy (int8):       {os.path.getsize(vectors_path) / 1e6:.1f} МБ ← используется")
-    print(f"  vectors_float32.npy:      {os.path.getsize(vectors_f32_path) / 1e6:.1f} МБ (для сравнения)")
-    print(f"  Экономия: {(1 - vectors_int8.nbytes / vectors.nbytes) * 100:.0f}%")
+    # Полная float32-версия — только для диагностики или будущего re-rank
+    if os.environ.get("EMBED_SAVE_F32", "").strip() in ("1", "true", "yes"):
+        vectors_f32_path = os.path.join(index_dir, "vectors_float32.npy")
+        np.save(vectors_f32_path, vectors)
+        print(f"  vectors_float32.npy:      {os.path.getsize(vectors_f32_path) / 1e6:.1f} МБ "
+              f"(диагностика, поиск не использует)")
 
     # Сохранение chunks.json (тот же, что для локальной модели)
     # Можно использовать symlink для экономии памяти и диска
@@ -258,21 +347,24 @@ def main() -> int:
     else:
         print(f"\nchunks.json уже существует, пропускаем")
 
-    # Сохранение metadata.json (НОВОЕ)
+    # Сохранение metadata.json (атомарно, как vectors.npy выше)
     metadata = {
         "model": model,
         "dimensions": int(vectors.shape[1]),
         "api": True,
-        "quantized": True,  # НОВОЕ: флаг квантизации
-        "dtype": "int8",    # НОВОЕ: тип данных
+        "quantized": index_dtype == "int8",  # флаг оставлен для совместимости чтения
+        "dtype": index_dtype,                # источник истины для retriever
+        "provider": provider,                # апстрим сборки — для сверки в рантайме
         "display_name": _display_name(model),
         "latency_ms": 350,  # типичная latency для API
-        "cost_per_1k": est_cost_per_1m * 1000 / 1_000_000,  # стоимость за 1000 запросов
-        "description": f"Внешняя модель через OpenRouter API (int8 quantized)",
+        "cost_per_1k": est_cost_per_1m * 1000 / 1_000_000,
+        "description": f"Внешняя модель через OpenRouter API ({index_dtype})",
     }
     metadata_path = os.path.join(index_dir, "metadata.json")
-    with open(metadata_path, "w", encoding="utf-8") as f:
+    tmp_meta_path = metadata_path + ".tmp"
+    with open(tmp_meta_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_meta_path, metadata_path)
 
     # Статистика
     vec_mb = os.path.getsize(vectors_path) / 1e6

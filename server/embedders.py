@@ -146,12 +146,18 @@ class OpenRouterEmbedder(BaseEmbedder):
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 10.0,
         max_retries: int = 3,
+        provider: str | None = None,
     ):
         self.model = model
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        # Список слагов апстрим-провайдеров OpenRouter через запятую ("nebius"
+        # или "nebius,deepinfra"). None = авто-роутинг. Важно: без пина роутинг
+        # может отдать запрос провайдеру с квантизованной версией модели (fp8) —
+        # векторы окажутся в другом пространстве.
+        self.provider = provider
         self._dimensions: int | None = None  # определяется при первом вызове
 
     @property
@@ -173,6 +179,13 @@ class OpenRouterEmbedder(BaseEmbedder):
         """
         url = f"{self.base_url}/embeddings"
         payload = {"model": self.model, "input": texts}
+        if self.provider:
+            # Пин апстрима: только перечисленные провайдеры, без fallback на других.
+            # Сборка индекса и рантайм-запросы должны ходить к одному провайдеру.
+            payload["provider"] = {
+                "only": [p.strip() for p in self.provider.split(",") if p.strip()],
+                "allow_fallbacks": False,
+            }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -187,7 +200,29 @@ class OpenRouterEmbedder(BaseEmbedder):
                     data = resp.json()
                     embeddings = [item["embedding"] for item in data["data"]]
                     vecs = np.array(embeddings, dtype=np.float32)
-                    # Запоминаем размерность при первом успешном вызове
+                    # Диагностика роутинга: OpenRouter возвращает фактического
+                    # провайдера в теле ответа (проверено живым запросом).
+                    # Авторитетная гарантия консистентности — сам пин в payload.
+                    actual = data.get("provider")
+                    if actual:
+                        log.debug(
+                            "embedding: %d текстов, модель %s, провайдер %s (pin: %s)",
+                            len(texts), self.model, actual, self.provider,
+                        )
+                    # Валидация: NaN/inf от провайдера отравляют индекс
+                    # (astype из NaN непредсказуем) — фейлим громко, а не молча.
+                    if not np.isfinite(vecs).all():
+                        raise RuntimeError(
+                            f"{self.model}: провайдер вернул NaN/inf в эмбеддингах"
+                        )
+                    # Размерность должна быть стабильна (в т.ч. сверка с metadata
+                    # индекса — retriever заранее ставит _dimensions)
+                    if self._dimensions is not None and vecs.shape[1] != self._dimensions:
+                        raise RuntimeError(
+                            f"{self.model}: размерность ответа изменилась "
+                            f"({self._dimensions} -> {vecs.shape[1]}) — провайдер "
+                            f"нестабилен или подменил модель"
+                        )
                     if self._dimensions is None:
                         self._dimensions = vecs.shape[1]
                     return vecs

@@ -129,3 +129,127 @@ def test_search_int8_no_overflow(tmp_path):
     scores = [x["score"] for x in res]
     assert scores == sorted(scores, reverse=True)
     assert scores[0] > scores[-1] + 0.1  # не плоский список
+
+
+def _make_f16_index(tmp_path, vectors, chunks):
+    """float16-индекс с metadata (как после перехода с int8 на float16)."""
+    np.save(tmp_path / "vectors.npy", np.asarray(vectors, dtype=np.float16))
+    (tmp_path / "chunks.json").write_text(
+        json.dumps(chunks, ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "model": "qwen/qwen3-embedding-8b",
+                "dimensions": int(np.asarray(vectors).shape[1]),
+                "api": True,
+                "quantized": False,
+                "dtype": "float16",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return str(tmp_path)
+
+
+def test_search_float16(tmp_path):
+    """f16-индекс: поиск работает, score ≈ косинус (без деления на 127²)."""
+    vecs = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+    chunks = [
+        {"text": "про труд", "source": "Письмо A", "meta": {"type": "письмо"}},
+        {"text": "про смерть", "source": "Дневник B", "meta": {"type": "дневник"}},
+        {"text": "про веру", "source": "Письмо C", "meta": {"type": "письмо"}},
+    ]
+    r = Retriever(index_dir=_make_f16_index(tmp_path, vecs, chunks))
+    assert not r.is_quantized
+    assert r.dtype == "float16"
+
+    res = r.search(np.array([1, 0, 0], dtype=np.float32), top_k=3)
+    assert res[0]["source"] == "Письмо A"
+    assert res[0]["score"] == pytest.approx(1.0, abs=1e-5)
+    scores = [x["score"] for x in res]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_f16_matches_f32_ranking(tmp_path):
+    """f16 не должен искажать ранжирование по сравнению с float32-эталоном."""
+    rng = np.random.default_rng(7)
+    dim, n, q_count = 512, 300, 20
+    vecs = rng.standard_normal((n, dim)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+
+    # запросы = документ + шум (~cos 0.5), чтобы топ был осмысленным
+    idx = rng.integers(0, n, size=q_count)
+    queries = vecs[idx] + rng.standard_normal((q_count, dim)).astype(np.float32) * 0.02
+    queries /= np.linalg.norm(queries, axis=1, keepdims=True)
+
+    chunks = [
+        {"text": f"фрагмент {i}", "source": f"Источник {i}", "meta": {"type": "проза"}}
+        for i in range(n)
+    ]
+    f16_dir, f32_dir = tmp_path / "f16", tmp_path / "f32"
+    f16_dir.mkdir(), f32_dir.mkdir()
+    r16 = Retriever(index_dir=_make_f16_index(f16_dir, vecs, chunks))
+    r32 = Retriever(index_dir=_make_index(f32_dir, vecs, chunks))
+
+    for q in queries:
+        top16 = [x["source"] for x in r16.search(q, top_k=10)]
+        top32 = [x["source"] for x in r32.search(q, top_k=10)]
+        assert top16[0] == top32[0]
+        assert len(set(top16) & set(top32)) >= 9  # не более 1 расхождения из 10
+
+
+def test_dtype_mismatch_raises(tmp_path):
+    """Файл одного dtype при metadata другого — жёсткая ошибка, а не тихий мусор."""
+    vecs = np.array([[1, 0, 0]], dtype=np.float32)
+    chunks = [{"text": "x", "source": "s", "meta": {}}]
+
+    # f16-файл + metadata "int8"
+    np.save(tmp_path / "vectors.npy", vecs.astype(np.float16))
+    (tmp_path / "chunks.json").write_text(json.dumps(chunks), encoding="utf-8")
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"model": "m", "dimensions": 3, "api": True,
+                    "quantized": True, "dtype": "int8"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="dtype"):
+        Retriever(index_dir=str(tmp_path))
+
+    # int8-файл + metadata "float16"
+    np.save(tmp_path / "vectors.npy", vecs.astype(np.int8))
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"model": "m", "dimensions": 3, "api": True,
+                    "quantized": False, "dtype": "float16"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="dtype"):
+        Retriever(index_dir=str(tmp_path))
+
+
+def test_float16_nan_rows_rejected(tmp_path):
+    """NaN-вектор от провайдера не должен попадать в обслуживаемый индекс."""
+    vecs = np.array([[1, 0, 0], [np.nan, 1, 0]], dtype=np.float32)
+    chunks = [
+        {"text": "a", "source": "s1", "meta": {}},
+        {"text": "b", "source": "s2", "meta": {}},
+    ]
+    with pytest.raises(ValueError, match="повреждённых"):
+        Retriever(index_dir=_make_f16_index(tmp_path, vecs, chunks))
+
+
+def test_float16_zero_row_rejected(tmp_path):
+    """Нулевая строка = повреждённый вектор (константа «притягивается» к любым запросам)."""
+    vecs = np.array([[1, 0, 0], [0, 0, 0]], dtype=np.float32)
+    chunks = [
+        {"text": "a", "source": "s1", "meta": {}},
+        {"text": "b", "source": "s2", "meta": {}},
+    ]
+    with pytest.raises(ValueError, match="повреждённых"):
+        Retriever(index_dir=_make_f16_index(tmp_path, vecs, chunks))
+
+
+def test_search_nan_query_returns_empty(tiny_index):
+    """NaN-запрос (битый ответ эмбеддера) не должен ронять поиск."""
+    r = Retriever(index_dir=tiny_index)
+    assert r.search(np.array([np.nan, 0, 0], dtype=np.float32), top_k=3) == []

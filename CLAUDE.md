@@ -65,9 +65,11 @@
 
 - `index/vectors.npy` — массив N×384 float32, L2-нормализован (MiniLM-L12-v2).
   Размер: ~30 МБ для ~19.6 тыс. фрагментов.
-- `index.qwen3-embedding-8b/` — внешний индекс Qwen3-8B: `vectors.npy` N×4096 int8
-  (~80 МБ), `chunks.json` — symlink на `index/chunks.json`, `metadata.json`
-  помечает `api: true` / `quantized: true`.
+- `index.qwen3-embedding-8b/` — внешний индекс Qwen3-8B: `vectors.npy` N×4096 float32
+  (~1.4 ГБ; влезает в 4 ГБ RAM сервера, mem_limit 3000m). Раньше int8 — усечение
+  обнуляло ~39% компонент и искажало топ-10. `EMBED_INDEX_DTYPE` позволяет собрать
+  float16 (716 МБ) при нехватке памяти. `chunks.json` — symlink на
+  `index/chunks.json`, `metadata.json` помечает `api: true` / `dtype` / `provider`.
 - `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год).
   Размер: ~43 МБ.
 - Связь по позиции: i-й вектор ↔ i-й элемент chunks.json.
@@ -134,8 +136,13 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
   деградирует). Зафиксировано в `uv.lock`, ставится через `uv sync --frozen`.
   При обновлении fastembed или смене модели — пересобрать индекс (`make embeddings`).
   **Текущая локальная модель: `paraphrase-multilingual-MiniLM-L12-v2`** (384 dims).
-  Внешняя: `qwen/qwen3-embedding-8b` (4096 dims, int8-индекс) — runtime-запросы
+  Внешняя: `qwen/qwen3-embedding-8b` (4096 dims, float32-индекс) — runtime-запросы
   к ней идут через OpenRouter, на сервере нужен `EXTERNAL_EMBEDDER_API_KEY` в `.env`.
+  **Провайдер-пин обязателен**: `EXTERNAL_EMBEDDER_PROVIDER` (дефолт `nebius`)
+  должен быть одинаковым при сборке и в рантайме — OpenRouter роутит запросы к
+  разным апстримам, один из которых (siliconflow) отдаёт модель в fp8-квантизации,
+  и векторы индекса/запроса оказываются в разных пространствах. Чекпоинт сборки
+  хранит fingerprint (model/provider/dims) и не резюмируется при несовпадении.
 - **Предзагрузка модели на сервере**: при первом деплое `deploy.sh` автоматически
   скачивает модель эмбеддингов (~120 МБ) в Docker volume `model_cache` **до** запуска
   контейнера. Это нужно чтобы избежать OOM kill при одновременной загрузке модели
