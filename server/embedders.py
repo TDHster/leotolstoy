@@ -192,7 +192,7 @@ class OpenRouterEmbedder(BaseEmbedder):
                         self._dimensions = vecs.shape[1]
                     return vecs
                 elif resp.status_code == 429:  # rate limit
-                    wait = 2 ** attempt  # exponential backoff
+                    wait = 5 * 2 ** attempt  # exponential backoff (5с, 10с, 20с, ...)
                     log.warning("Rate limit (429), retry %d/%d через %ds", attempt + 1, self.max_retries, wait)
                     time.sleep(wait)
                 else:
@@ -215,7 +215,7 @@ class OpenRouterEmbedder(BaseEmbedder):
 
             except httpx.RequestError as e:
                 if attempt < self.max_retries - 1:
-                    wait = 2 ** attempt
+                    wait = 5 * 2 ** attempt
                     log.warning("Сеть недоступна (%s), retry %d/%d через %ds", e, attempt + 1, self.max_retries, wait)
                     time.sleep(wait)
                 else:

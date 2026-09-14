@@ -31,6 +31,47 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MIN_CHARS = 40  # чанки короче — мусор
+CHECKPOINT_EVERY_BATCHES = 10  # сохраняем прогресс каждые N батчей
+
+
+def _checkpoint_paths(index_dir: str) -> tuple[str, str]:
+    return (
+        os.path.join(index_dir, ".partial_vectors.npy"),
+        os.path.join(index_dir, ".partial_meta.json"),
+    )
+
+
+def save_checkpoint(index_dir: str, processed: int, total: int, vectors: np.ndarray) -> None:
+    """Сохранить промежуточный результат, чтобы перезапуск не начинался с нуля."""
+    vec_path, meta_path = _checkpoint_paths(index_dir)
+    np.save(vec_path, vectors)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({"processed": processed, "total": total}, f)
+
+
+def load_checkpoint(index_dir: str, total: int) -> np.ndarray | None:
+    """Вернуть промежуточные векторы, если чекпоинт валиден (тот же корпус)."""
+    vec_path, meta_path = _checkpoint_paths(index_dir)
+    if not (os.path.exists(vec_path) and os.path.exists(meta_path)):
+        return None
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("total") != total:
+            return None
+        vecs = np.load(vec_path)
+        if vecs.ndim != 2 or vecs.shape[0] > total or vecs.shape[0] != meta.get("processed"):
+            return None
+        return vecs
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def clear_checkpoint(index_dir: str) -> None:
+    vec_path, meta_path = _checkpoint_paths(index_dir)
+    for p in (vec_path, meta_path):
+        if os.path.exists(p):
+            os.remove(p)
 
 
 def main() -> int:
@@ -61,6 +102,12 @@ def main() -> int:
 
     texts = [c.text for c in chunks]
 
+    # Каталог индекса нужен уже сейчас — для чекпоинтов прогресса
+    # model_id для фронтенда: "qwen/qwen3-embedding-8b" → "qwen3-embedding-8b" (только последняя часть)
+    model_id = model.split("/")[-1] if "/" in model else model
+    index_dir = os.path.join(ROOT, f"index.{model_id}")
+    os.makedirs(index_dir, exist_ok=True)
+
     # Импорт эмбеддера (здесь, чтобы не грузить лишнее если нет чанков)
     from embedders import OpenRouterEmbedder  # noqa: E402
 
@@ -68,7 +115,11 @@ def main() -> int:
     print(f"API: {base_url}")
     sys.stdout.flush()
 
-    embedder = OpenRouterEmbedder(model=model, api_key=api_key, base_url=base_url, timeout=30.0)
+    # Таймаут 120с: батч из 100 текстов (~25k токенов) под нагрузкой OpenRouter
+    # может думать дольше 30с. 5 попыток с экспоненциальным backoff.
+    embedder = OpenRouterEmbedder(
+        model=model, api_key=api_key, base_url=base_url, timeout=120.0, max_retries=5
+    )
 
     t0 = time.time()
 
@@ -76,11 +127,24 @@ def main() -> int:
     batch_size = 100
     all_vecs = []
 
+    # Возобновление с чекпоинта (если прошлый запуск упал) — не начинаем с нуля
+    resume = load_checkpoint(index_dir, len(texts))
+    if resume is not None and resume.shape[0] > 0:
+        print(f"Найден чекпоинт: {resume.shape[0]}/{len(texts)} чанков уже готово — "
+              f"продолжаем с этого места")
+        all_vecs.append(resume)
+        start = resume.shape[0]
+        batches_done = resume.shape[0] // batch_size
+    else:
+        start = 0
+        batches_done = 0
+
     try:
-        for i in range(0, len(texts), batch_size):
+        for i in range(start, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             batch_vecs = embedder._call_api(batch)
             all_vecs.append(batch_vecs)
+            batches_done += 1
 
             # Прогресс
             processed = min(i + batch_size, len(texts))
@@ -89,6 +153,10 @@ def main() -> int:
             rate = processed / elapsed if elapsed > 0 else 0
             eta_sec = (len(texts) - processed) / rate if rate > 0 else 0
             eta_min = eta_sec / 60
+
+            # Чекпоинт каждые N батчей — при обрыве продолжаем с места обрыва
+            if batches_done % CHECKPOINT_EVERY_BATCHES == 0:
+                save_checkpoint(index_dir, processed, len(texts), np.vstack(all_vecs))
 
             # Прогресс-бар
             bar_width = 40
@@ -101,6 +169,8 @@ def main() -> int:
         print()  # новая строка после прогресс-бара
     except Exception as e:
         print(f"\n\nОшибка при вызове API: {e}", file=sys.stderr)
+        print(f"Прогресс сохранён в чекпоинте — перезапустите `make embeddings-qwen`, "
+              f"сборка продолжится с места обрыва.", file=sys.stderr)
         return 1
 
     vectors = np.vstack(all_vecs)
@@ -141,12 +211,6 @@ def main() -> int:
         est_cost_per_1m = 0.0
     est_cost = (est_tokens / 1_000_000) * est_cost_per_1m
     print(f"Оценка: ~{est_tokens:,} токенов, ~${est_cost:.2f} ({model})")
-
-    # Определить каталог индекса
-    # model_id для фронтенда: "qwen/qwen3-embedding-8b" → "qwen3-embedding-8b" (только последняя часть)
-    model_id = model.split("/")[-1] if "/" in model else model
-    index_dir = os.path.join(ROOT, f"index.{model_id}")
-    os.makedirs(index_dir, exist_ok=True)
 
     # Сохранение vectors.npy (int8 для экономии памяти)
     vectors_path = os.path.join(index_dir, "vectors.npy")
@@ -217,9 +281,12 @@ def main() -> int:
     print(f"  vectors.npy     {vec_mb:.1f} МБ")
     print(f"  chunks.json     {json_mb:.1f} МБ")
     print(f"  metadata.json   {os.path.getsize(metadata_path) / 1e3:.1f} КБ")
-    print(f"\nПеренос на сервер: ./deploy.sh (rsync автоматически синкает)")
-    print(f"Локально: make run, затем открыть http://localhost:8000 и переключить модель")
 
+    # Сборка завершилась — чекпоинт больше не нужен
+    clear_checkpoint(index_dir)
+
+    print(f"\nИндексы rsync'ом не синкаются (.rsyncignore: index*/) — сборка")
+    print("выполняется там же, где индекс используется.")
     return 0
 
 
