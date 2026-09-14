@@ -26,7 +26,10 @@ __pycache__/
 *.epub
 data/*
 !data/README.md
-index/
+
+# Индексы эмбеддингов собираются на месте (make embeddings / make embeddings-qwen),
+# весят сотни МБ — не для git. Покрывает index/, index.backup/, index.<model>/
+index*/
 
 # TLS-сертификаты (приватный ключ — секрет)
 certs/
@@ -44,6 +47,3 @@ server/static/favicon.ico
 # Документация миграции (может содержать чувствительную информацию о сервере)
 migrate-to-https.md
 server/static/Фотопортрет_Л._Толстого_(Шерер,_Набгольц_и_Ко)_(cropped).jpg
-
-index.backup/
-index.qwen3-embedding-8b/chunks.json
