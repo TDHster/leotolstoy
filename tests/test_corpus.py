@@ -44,6 +44,40 @@ def test_split_long_paragraph():
     assert all(len(p) <= corpus.CHUNK_CHARS * 1.2 for p in parts)
 
 
+def test_split_long_overlap_between_parts():
+    # перекрытие: последнее предложение куска повторяется первым в следующем
+    para = ". ".join(["Предложение номер %d" % i for i in range(100)]) + "."
+    parts = corpus._split_long(para)
+    assert len(parts) > 1
+    assert all(len(p) <= corpus.CHUNK_CHARS * 1.2 for p in parts)
+    for a, b in zip(parts, parts[1:]):
+        last_a = a.split(". ")[-1].strip().rstrip(".")
+        first_b = b.split(". ")[0].strip().rstrip(".")
+        assert last_a == first_b
+    # ничего не потеряно: каждое предложение есть хотя бы в одном куске
+    joined = ". ".join(parts)
+    for i in range(100):
+        assert "Предложение номер %d" % i in joined
+
+
+def test_split_long_giant_sentence_not_lost():
+    # предложение длиннее чанка целиком попадает в один кусок
+    giant = "А" * (corpus.CHUNK_CHARS + 200)
+    parts = corpus._split_long(giant + ". И короткое предложение.")
+    assert any(giant in p for p in parts)
+    assert any("короткое" in p for p in parts)
+
+
+def test_chunk_paragraphs_overlap_no_oversize():
+    # абзацы размером с чанк: перекрытие не влезает — чанки не должны
+    # разрастаться за счёт дубля перекрытия
+    paras = ["п" * 400, "р" * 400, "о" * 400]
+    chunks = corpus._chunk_paragraphs(paras)
+    assert all(len(c) <= corpus.CHUNK_CHARS * 1.5 for c in chunks)
+    # текст не потерян
+    assert all(p in "|".join(chunks) for p in paras)
+
+
 def test_source_label_letter():
     meta = {"type": "письмо", "year": "1849", "num": "4", "to": "С. Н. Толстому"}
     label = corpus.source_label(meta)

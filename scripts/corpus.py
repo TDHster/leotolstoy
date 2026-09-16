@@ -17,9 +17,11 @@ from dataclasses import dataclass, field
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
-# Целевой размер чанка в символах. MiniLM-L12-v2 берёт до ~512 токенов;
-# ~1500 символов кириллицы (≈400 токенов) даёт больше контекста с запасом.
-CHUNK_CHARS = 1500
+# Целевой размер чанка в символах. MiniLM-L12-v2 эмбеддит только первые ~128 токенов
+# любого текста (~3.3 симв/токен на кириллице, измерено токенизатором fastembed —
+# т.е. окно ≈ 420-460 символов), поэтому чанк выбираем размером с окно: вектор
+# покрывает весь текст чанка, а не только его «голову».
+CHUNK_CHARS = 450
 CHUNK_OVERLAP_PARAS = 1  # сколько абзацев перекрытия между соседними чанками
 
 # Справочный аппарат изданий (указатели имён, оглавления) не несёт смысловой
@@ -231,6 +233,10 @@ def _chunk_paragraphs(paras: list[str]) -> list[str]:
             # перекрытие: оставляем последние N абзацев
             buf = buf[-CHUNK_OVERLAP_PARAS:] if CHUNK_OVERLAP_PARAS else []
             buf_len = sum(len(p) for p in buf)
+        # перекрытие + новый абзац не влезают в чанк — сбрасываем перекрытие,
+        # чтобы чанк не разрастался вдвое за счёт дубля
+        if buf_len + len(para) > CHUNK_CHARS and buf:
+            buf, buf_len = [], 0
         buf.append(para)
         buf_len += len(para)
     if buf:
@@ -244,6 +250,11 @@ def _split_long(para: str) -> list[str]:
     for s in sents:
         if blen + len(s) > CHUNK_CHARS and buf:
             out.append(" ".join(buf))
+            # перекрытие: последнее предложение переходит в следующий кусок,
+            # чтобы граница не рвала контекст
+            buf, blen = buf[-1:], len(buf[-1])
+        # перекрытие не влезает (гигантское предложение) — без него
+        if blen + len(s) > CHUNK_CHARS and buf:
             buf, blen = [], 0
         buf.append(s)
         blen += len(s)
