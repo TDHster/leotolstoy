@@ -46,7 +46,7 @@ def main() -> int:
     chunks = [c for c in chunks if len(c.text) >= MIN_CHARS]
     print(f"Чанков: {len(chunks)} (отброшено коротких: {before - len(chunks)})")
     if not chunks:
-        print("Нечего эмбеддить. Сначала: python3 scripts/epub_to_txt.py", file=sys.stderr)
+        print("Нечего эмбеддить. Сначала: make convert", file=sys.stderr)
         return 1
 
     texts = [c.text for c in chunks]
@@ -98,6 +98,20 @@ def main() -> int:
         })
     with open(os.path.join(INDEX_DIR, "chunks.json"), "w", encoding="utf-8") as f:
         json.dump(meta_out, f, ensure_ascii=False)
+
+    # метаданные индекса: без них /models не покажет модель в UI
+    # (формат как в build_embeddings_api.py)
+    index_meta = {
+        "model": MODEL_NAME,
+        "dimensions": EMBED_DIM,
+        "api": False,
+        "display_name": "Локальная (MiniLM)",
+        "latency_ms": 50,
+        "cost_per_1k": 0,
+        "description": "Локальная ONNX-модель, эмбеддинг без внешнего API",
+    }
+    with open(os.path.join(INDEX_DIR, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(index_meta, f, ensure_ascii=False, indent=2)
 
     vec_mb = os.path.getsize(os.path.join(INDEX_DIR, "vectors.npy")) / 1e6
     json_mb = os.path.getsize(os.path.join(INDEX_DIR, "chunks.json")) / 1e6

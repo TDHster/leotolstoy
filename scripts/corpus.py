@@ -270,7 +270,12 @@ def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
     None = всё.
     """
     chunks: list[Chunk] = []
-    files = sorted(glob.glob(os.path.join(DATA_DIR, "tom*.txt")))
+    # tom*.txt — художественные произведения (EPUB, legacy); tei_*.txt — письма
+    # и дневники из TEI-корпуса tolstoydigital (см. scripts/tei_to_txt.py).
+    files = sorted(
+        glob.glob(os.path.join(DATA_DIR, "tom*.txt"))
+        + glob.glob(os.path.join(DATA_DIR, "tei_*.txt"))
+    )
     for path in files:
         for meta, paras in _iter_records(path):
             if include_types and meta.get("type") not in include_types:

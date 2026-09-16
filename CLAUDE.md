@@ -13,13 +13,13 @@
 
 ```
 Локальная машина (разработка, подготовка)   Сервер (прод)
-├─ make convert   EPUB → data/*.txt          └─ Caddy (reverse proxy, :443)
-├─ make embeddings data/*.txt → index/            └─ TLS терминация (Let's Encrypt)
-│     эмбеддинги локально (ONNX)                      └─ Docker (FastAPI, :8000 HTTP localhost)
-├─ make run       локально по HTTP                        ├─ Basic Auth (1 пользователь)
-└─ ./deploy.sh    rsync + тесты + compose                 ├─ эмбеддинг запроса (ONNX)
-                                                           ├─ косинус-поиск top-k (numpy)
-                                                           └─ генерация (внешняя LLM)
+├─ make tei-fetch TEI-корпус (sparse clone) └─ Caddy (reverse proxy, :443)
+├─ make convert   TEI/XML → data/*.txt           └─ TLS терминация (Let's Encrypt)
+├─ make embeddings data/*.txt → index/               └─ Docker (FastAPI, :8000 HTTP localhost)
+│     эмбеддинги локально (ONNX)                          ├─ Basic Auth (1 пользователь)
+├─ make run       локально по HTTP                       ├─ эмбеддинг запроса (ONNX)
+└─ ./deploy.sh    rsync + тесты + compose                ├─ косинус-поиск top-k (numpy)
+                                                         └─ генерация (внешняя LLM)
 ```
 
 Ключевые решения:
@@ -44,8 +44,9 @@
 
 | Путь | Назначение |
 |---|---|
-| `scripts/epub_to_txt.py` | EPUB (все тома) → `data/*.txt`: тома 18-22 с детальной структурой (письма/дневники), остальные — весь текст целиком |
-| `scripts/corpus.py` | чтение txt, нарезка на чанки + метаданные |
+| `scripts/epub_to_txt.py` | **legacy**: EPUB → `data/tom*.txt` (до переезда на digital Tolstoy; проза tom01–45 пока оттуда) |
+| `scripts/tei_to_txt.py` | TEI/XML писем и дневников (tolstoydigital/TEI, CC BY-SA) → `data/tei_letters.txt`, `data/tei_diaries.txt` |
+| `scripts/corpus.py` | чтение `data/tom*.txt` + `data/tei_*.txt`, нарезка на чанки + метаданные |
 | `scripts/embed.py` | общий модуль эмбеддингов (сборка и сервер) |
 | `scripts/build_embeddings.py` | сборка локального индекса → `index/vectors.npy` + `chunks.json` |
 | `scripts/build_embeddings_api.py` | сборка индекса внешней моделью (Qwen через OpenRouter) → `index.<model>/` |
@@ -64,19 +65,25 @@
 ## Индекс (не в git)
 
 - `index/vectors.npy` — массив N×384 float32, L2-нормализован (MiniLM-L12-v2).
-  Размер: ~30 МБ для ~19.6 тыс. фрагментов.
+- **Письма и дневники — из TEI-корпуса tolstoydigital** (`data/tei_letters.txt`,
+  `data/tei_diaries.txt`; ~52.7 тыс. чанков при EMBED_TYPES=письмо,дневник).
+  Метаданные: адресат, дата, место, № письма в томе, титул, библиографическая
+  ссылка ПСС, страницы, год издания, признак дореформенной орфографии.
+- Проза (tom01–45) — из EPUB, legacy; в индексе её нет (фильтр EMBED_TYPES).
+  Старые EPUB-тома писем/дневников (46–90) лежат в `data/unused_tom/` — вне
+  корпуса (глоб читает только `data/*.txt`, не подкаталоги).
 - `index.qwen3-embedding-8b/` — внешний индекс Qwen3-8B: `vectors.npy` N×4096 float32
   (~1.4 ГБ; влезает в 4 ГБ RAM сервера, mem_limit 3000m). Раньше int8 — усечение
   обнуляло ~39% компонент и искажало топ-10. `EMBED_INDEX_DTYPE` позволяет собрать
   float16 (716 МБ) при нехватке памяти. `chunks.json` — symlink на
   `index/chunks.json`, `metadata.json` помечает `api: true` / `dtype` / `provider`.
 - `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год).
-  Размер: ~43 МБ.
+  Размер: ~100 МБ для ~52.7 тыс. чанков (письма+дневники).
 - Связь по позиции: i-й вектор ↔ i-й элемент chunks.json.
 - Индексы собираются там же, где используются: локальный — `make embeddings`,
   внешний — `make embeddings-qwen` (на сервере). В `.rsyncignore` — `index*/`,
   deploy.sh индексы не копирует и не удаляет.
-- Векторизация всех 22 томов занимает ~2-5 минут на обычном CPU.
+- Векторизация писем и дневников (~52.7 тыс. чанков) занимает ~10-20 минут на обычном CPU.
 
 ### Альтернатива: векторизация через OpenRouter API (2026)
 
@@ -110,8 +117,10 @@
 
 ```bash
 make install      # uv sync
-make convert      # EPUB → data/*.txt
-make embeddings   # data/*.txt → index/
+make tei-fetch    # скачать/обновить TEI-корпус (sparse: только texts/letters + texts/diaries, без аудио/картинок)
+make convert      # TEI/XML → data/tei_letters.txt, data/tei_diaries.txt
+make tei          # tei-fetch + convert
+make embeddings   # data/*.txt → index/ (локальная модель)
 make run          # локальный сервер (HTTP, http://localhost:8000)
 uv run pytest     # тесты (~0.3с, без сети/модели)
 ./deploy.sh       # деплой (тесты → rsync → docker compose на сервере)
@@ -155,8 +164,12 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
 - **Секреты**: `.env*`, `.deploy`, `certs/`, `favicon.ico` в `.gitignore`; в
   `.rsyncignore` их НЕТ (должны уехать на сервер). EPUB-издание 1978 г. под
   авторским правом — тоже не в git (`data/` игнорируется).
-- **Издание 1978 г. — современная орфография** (не дореформенная), нормализация
-  не нужна.
+- **Орфография TEI**: в файлах параллельно `<orig>` (дореформенная) и `<reg>`
+  (современная) — `tei_to_txt.py` берёт `<reg>`, нормализация в corpus.py
+  осталась как страховка.
+- **Не запускать legacy `scripts/epub_to_txt.py`**: он снова создаст
+  `data/tom46–90.txt` (дубли писем/дневников) — в этом случае удалить их
+  повторно или перенести в `data/unused_tom/`.
 - **curl в Docker-образе нет** — healthcheck и внутренние проверки через Python.
 
 ## Open-source
