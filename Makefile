@@ -44,8 +44,8 @@ tei: tei-fetch convert
 embeddings:
 	uv run python scripts/build_embeddings.py
 	@if [ "$$(uname)" != "Darwin" ] && command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
-		echo "🔄 Запуск Docker контейнеров (up -d)..."; \
-		docker compose up -d; \
+		echo "🔄 Перезапуск Docker-контейнеров (force-recreate — подхватить новый индекс)..."; \
+		docker compose up -d --force-recreate; \
 	fi
 
 # GPU-версия (требует: uv pip install sentence-transformers torch)
@@ -56,8 +56,8 @@ embeddings-gpu:
 embeddings-qwen:
 	uv run python scripts/build_embeddings_api.py
 	@if [ "$$(uname)" != "Darwin" ] && command -v docker compose &> /dev/null && [ -f docker-compose.yml ]; then \
-		echo "🔄 Запуск Docker контейнеров (up -d)..."; \
-		docker compose up -d; \
+		echo "🔄 Перезапуск Docker-контейнеров (force-recreate — подхватить новый индекс)..."; \
+		docker compose up -d --force-recreate; \
 	fi
 
 run:
