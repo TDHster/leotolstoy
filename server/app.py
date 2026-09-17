@@ -67,6 +67,7 @@ SRC_TYPES_SET = {t.strip() for t in SRC_TYPES.split(",") if t.strip()} or None
 MAX_MESSAGE_CHARS = int(os.environ.get("MAX_MESSAGE_CHARS", "2000"))
 RATE_LIMIT_CHAT = os.environ.get("RATE_LIMIT_CHAT", "20/minute;200/day")
 RATE_LIMIT_LOGIN = os.environ.get("RATE_LIMIT_LOGIN", "30/minute")
+RATE_LIMIT_DOC = os.environ.get("RATE_LIMIT_DOC", "30/minute")
 AUTH_FAIL_DELAY = float(os.environ.get("AUTH_FAIL_DELAY", "0.5"))
 # Логировать текст запросов/ответов. По умолчанию ВЫКЛ — это персональные данные
 # пользователей (их вопросы). Включайте осознанно на своём сервере: LOG_QUERIES=1.
@@ -431,10 +432,42 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
             "text": r["text"],  # оригинальный фрагмент, ушедший в модель
             "type": r["meta"].get("type", ""),
             "year": r["meta"].get("year", ""),
+            "doc": r["meta"].get("doc", ""),  # id полного текста в index/docs.json ("" для старых индексов)
         }
         for r in results
     ]
     return ChatOut(reply=reply, sources=sources)
+
+
+# --- полный текст источника (клик по фрагменту в UI) -------------------------
+_docs_cache: list[dict] | None = None  # index/docs.json, лениво, один раз на процесс
+
+
+def _load_docs() -> list[dict]:
+    global _docs_cache
+    if _docs_cache is None:
+        path = os.path.join(_get_index_dir("local"), "docs.json")
+        if not os.path.exists(path):
+            raise HTTPException(404, "Полные тексты недоступны: index/docs.json не найден. "
+                                     "Пересоберите индекс (make embeddings).")
+        with open(path, encoding="utf-8") as f:
+            _docs_cache = json.load(f)
+    return _docs_cache
+
+
+@app.get("/doc/{doc_id}")
+@limiter.limit(RATE_LIMIT_DOC)
+async def get_doc(request: Request, doc_id: int, _user: str = Depends(auth)):
+    try:
+        docs = await run_in_threadpool(_load_docs)  # json.load ~23 МБ — не блокируем event loop
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.error("Не удалось прочитать index/docs.json: %s", e)
+        raise HTTPException(404, "Полные тексты недоступны (повреждён index/docs.json).") from e
+    if doc_id < 0 or doc_id >= len(docs):
+        raise HTTPException(404, f"Документ {doc_id} не найден")
+    return docs[doc_id]
 
 
 @app.get("/")

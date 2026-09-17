@@ -123,6 +123,22 @@
                         color:var(--ink); font-size:13px; white-space:pre-wrap;
                         line-height:1.5; }
   .thinking { color:var(--muted); font-style:italic; }
+
+  /* модалка полного текста источника */
+  dialog#docModal { border:1px solid var(--line); border-radius:10px;
+                    background:var(--paper); color:var(--ink);
+                    max-width:760px; width:92vw; max-height:85vh; padding:0; }
+  dialog#docModal::backdrop { background:rgba(43,38,34,.45); }
+  .doc-head { position:sticky; top:0; background:var(--paper);
+              border-bottom:1px solid var(--line); padding:12px 44px 8px 16px; }
+  .doc-head h2 { margin:0; font-size:17px; font-weight:600; }
+  .docmeta { margin-top:4px; font-size:12px; color:var(--muted); }
+  .doc-x { position:absolute; top:8px; right:8px; padding:0 10px; }
+  #docBody { overflow-y:auto; max-height:70vh; padding:4px 20px 16px; }
+  #docBody p { margin:10px 0; white-space:pre-wrap; }
+  #docBody mark { background:#f0e2bd; }
+  .doclink { color:var(--accent); cursor:pointer; }
+  .doc-open { margin-top:6px; }
   form { position:sticky; bottom:0; background:var(--bg);
          max-width:760px; margin:0 auto; padding:12px 16px 20px;
          display:flex; gap:8px; border-top:1px solid var(--line); }
@@ -156,6 +172,15 @@
   <textarea id="input" placeholder="Ваш вопрос…" autofocus></textarea>
   <button id="send" type="submit">Спросить</button>
 </form>
+
+<dialog id="docModal">
+  <div class="doc-head">
+    <h2 id="docTitle"></h2>
+    <div class="docmeta" id="docMeta"></div>
+    <button id="docClose" class="doc-x" type="button" aria-label="Закрыть">✕</button>
+  </div>
+  <div id="docBody"></div>
+</dialog>
 
 <script>
 const chat = document.getElementById('chat');
@@ -276,23 +301,103 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// Сниппеты с полными текстами: {doc, text, type} — по индексу в data-idx ссылок
+const docSnippets = [];
+
 function addSources(list, modelName) {
   if (!list || !list.length) return;
   const d = document.createElement('div');
   d.className = 'sources';
-  const items = list.map(s => `
+  const items = list.map(s => {
+    // ссылка «открыть полностью» — только если у фрагмента есть doc_id
+    let openLink = '';
+    if (s.doc) {
+      const idx = docSnippets.length;
+      docSnippets.push({doc: s.doc, text: s.text, type: s.type});
+      const linkText = s.type === 'дневник' ? 'открыть запись дневника' : 'открыть письмо целиком';
+      openLink = `<div class="doc-open"><a class="doclink" data-idx="${idx}" href="#">${linkText}</a></div>`;
+    }
+    return `
     <li>
       <details>
         <summary>${esc(s.source)} <span class="score" title="Косинус угла между запросом и фрагментом: 1 — совпадение по смыслу, меньше — дальше">(cos φ = ${esc(s.score)})</span></summary>
-        <blockquote>${esc(s.text)}</blockquote>
+        <blockquote>${esc(s.text)}${openLink}</blockquote>
       </details>
-    </li>`).join('');
+    </li>`;
+  }).join('');
   const header = modelName
     ? `Фрагменты, на которые опирался ответ (${list.length}) · модель: ${esc(modelName)}`
     : `Фрагменты, на которые опирался ответ (${list.length})`;
   d.innerHTML = `<details open><summary>${header}</summary><ul class="srclist">${items}</ul></details>`;
   chat.appendChild(d);
+  d.querySelectorAll('.doclink').forEach(a =>
+    a.addEventListener('click', e => { e.preventDefault(); openDoc(+a.dataset.idx); }));
 }
+
+function docMetaLine(m) {
+  const parts = [];
+  if (m.to) parts.push('Кому: ' + m.to);
+  if (m.date) parts.push(m.date);
+  if (m.place) parts.push(m.place);
+  if (m.vol) parts.push('том ' + m.vol);
+  if (m.pages) parts.push('с. ' + m.pages);
+  if (m.year) parts.push(m.year);
+  if (m.ed_year) parts.push('изд. ' + m.ed_year);
+  return parts.join(' · ');
+}
+
+async function openDoc(idx) {
+  const s = docSnippets[idx];
+  if (!s) return;
+  const dialog = document.getElementById('docModal');
+  const body = document.getElementById('docBody');
+  body.textContent = 'Загрузка…';
+  dialog.showModal();
+  try {
+    const r = await fetch('/doc/' + encodeURIComponent(s.doc));  // Basic Auth уже в кеше браузера
+    if (!r.ok) {
+      body.textContent = 'Ошибка: ' + r.status + ' ' + await r.text();
+      return;
+    }
+    const d = await r.json();
+    document.getElementById('docTitle').textContent = d.label || '';
+    document.getElementById('docMeta').textContent = docMetaLine(d.meta || {});
+    body.innerHTML = '';
+    let target = null;
+    for (const p of (d.text || '').split('\n\n')) {
+      const el = document.createElement('p');
+      const i = p.indexOf(s.text);
+      if (i !== -1) {  // обычный случай: чанк — дословная подстрока абзаца
+        el.append(p.slice(0, i), Object.assign(document.createElement('mark'),
+                 {textContent: s.text}), p.slice(i + s.text.length));
+        target = el;
+      } else {
+        el.textContent = p;
+      }
+      body.appendChild(el);
+    }
+    if (!target) {
+      // фоллбек: длинный абзац был порезан на предложения, пробелы могли
+      // нормализоваться — сравниваем после схлопывания пробелов
+      const ns = s.text.replace(/\s+/g, ' ').trim();
+      for (const el of body.querySelectorAll('p')) {
+        if (el.textContent.replace(/\s+/g, ' ').trim().includes(ns)) {
+          el.innerHTML = '<mark>' + esc(el.textContent) + '</mark>';
+          target = el;
+          break;
+        }
+      }
+    }
+    if (target) target.scrollIntoView({block: 'center'});
+  } catch (e) {
+    body.textContent = 'Сеть недоступна: ' + e.message;
+  }
+}
+
+// Закрытие модалки: Esc даёт нативный <dialog>; бэкдроп и ✕ — вручную
+const docModal = document.getElementById('docModal');
+document.getElementById('docClose').addEventListener('click', () => docModal.close());
+docModal.addEventListener('click', e => { if (e.target === docModal) docModal.close(); });
 
 async function ask(text) {
   addMsg('user', text);

@@ -24,13 +24,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
-from corpus import load_chunks, source_label  # noqa: E402
+from corpus import MIN_CHARS, load_chunks, load_docs, source_label  # noqa: E402
 from embed import embed_passages, EMBED_DIM, MODEL_NAME   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 INDEX_DIR = os.path.join(ROOT, "index")
-
-MIN_CHARS = 40  # чанки короче — мусор (обрывки), выбрасываем
 
 
 def main() -> int:
@@ -99,6 +97,12 @@ def main() -> int:
     with open(os.path.join(INDEX_DIR, "chunks.json"), "w", encoding="utf-8") as f:
         json.dump(meta_out, f, ensure_ascii=False)
 
+    # Полные тексты записей для GET /doc (с подписями — в отличие от чанков).
+    # Тот же прогон и тот же include_types, что у chunks.json — doc_id совпадают.
+    docs = load_docs(include_types=include)
+    with open(os.path.join(INDEX_DIR, "docs.json"), "w", encoding="utf-8") as f:
+        json.dump(docs, f, ensure_ascii=False)
+
     # метаданные индекса: без них /models не покажет модель в UI
     # (формат как в build_embeddings_api.py)
     index_meta = {
@@ -115,9 +119,11 @@ def main() -> int:
 
     vec_mb = os.path.getsize(os.path.join(INDEX_DIR, "vectors.npy")) / 1e6
     json_mb = os.path.getsize(os.path.join(INDEX_DIR, "chunks.json")) / 1e6
+    docs_mb = os.path.getsize(os.path.join(INDEX_DIR, "docs.json")) / 1e6
     print(f"\nСохранено:")
     print(f"  index/vectors.npy   {vec_mb:.1f} МБ")
     print(f"  index/chunks.json   {json_mb:.1f} МБ")
+    print(f"  index/docs.json     {docs_mb:.1f} МБ ({len(docs)} записей)")
     print(f"\nСервер: индексы rsync'ом не синкаются (.rsyncignore: index*/) —")
     print("соберите индекс на сервере: make embeddings")
     return 0

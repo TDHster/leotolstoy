@@ -19,10 +19,11 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")
 
 # Целевой размер чанка в символах. MiniLM-L12-v2 эмбеддит только первые ~128 токенов
 # любого текста (~3.3 симв/токен на кириллице, измерено токенизатором fastembed —
-# т.е. окно ≈ 420-460 символов), поэтому чанк выбираем размером с окно: вектор
-# покрывает весь текст чанка, а не только его «голову».
+# т.е. окно ≈ 420-460 символов), поэтому длинные абзацы режем по предложениям
+# так, чтобы вектор покрывал весь текст чанка, а не только его «голову».
 CHUNK_CHARS = 450
-CHUNK_OVERLAP_PARAS = 1  # сколько абзацев перекрытия между соседними чанками
+MIN_CHARS = 40  # короче — склеиваем с соседним абзацем (иначе выпал бы при эмбеддинге)
+SIG_MAX_CHARS = 80  # подписи/даты длиннее не трогаем (консервативно)
 
 # Справочный аппарат изданий (указатели имён, оглавления) не несёт смысловой
 # нагрузки для RAG — такие записи пропускаем при сборке индекса.
@@ -193,6 +194,96 @@ def _strip_editorial_notes(text: str) -> str:
     return '\n'.join(lines[:end_boundary])
 
 
+# --- фильтр подписей/дат в конце писем --------------------------------------
+# Подписи («Л. Толстой.», «Граф Лев Толстой.») и даты («31 окт. 1909.») — это
+# короткие хвостовые абзацы письма. В выдаче они не нужны (шум для поиска и для
+# LLM), поэтому вырезаем их на уровне чанков — сами данные не трогаем.
+# Фильтр консервативный: только хвост записи, только короткие строки,
+# только подходящие под явные паттерны подписи/даты.
+
+# Фамилия в любой падежной/дореформенной форме + пунктуация в конце строки
+_NAME_END_RE = re.compile(
+    r"(Толст(ой|аго|ого|ому|ым|ая|ых)?|Tolst(oy|oï))\s*[.,:;»!?…]*\s*$", re.IGNORECASE)
+# «Л. Толстой. 1844 Мая 30.» — фамилия + дата-хвост в одной строке
+_NAME_WITH_DATE_RE = re.compile(r"(толст|tolst)", re.IGNORECASE)
+_DATE_TAIL_RE = re.compile(
+    r"\d{4}\s+(Января|Февраля|Марта|Апреля|Мая|Июня|Июля|Августа|"
+    r"Сентября|Октября|Ноября|Декабря)\s+\d{1,2}\.?\s*$", re.IGNORECASE)
+# Подписные формулы без фамилии: «Ваш», «Твой Л.», «Любящий вас», «Брат ваш»…
+_OPENING_RE = re.compile(
+    r"^(Ваш|Твой|Любящ\w*|Уважающ\w*|Брат\s+(ваш|твой)"
+    r"|С\s+(совершенным|искренним|истинным)\s+(уважением|почтением)"
+    r"|Искренне\s+(уважающ\w*|ваш)"
+    r"|Остаюсь\s+(ваш|с\s+))\b",
+    re.IGNORECASE)
+_INITIALS_RE = re.compile(r"^Л\.\s*[ТT]\.?$", re.IGNORECASE)
+_DATE_RE = re.compile(
+    r"^\d{4}\s*(г\.?)?\s*\.?\s*$"                                   # 1907. / 1907 г.
+    r"|^\d{4}\s*(г\.?)?\s*[.,]?\s*\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|"
+    r"июля|августа|сентября|октября|ноября|декабря)\s*\.?\s*$"       # 1903. 20 марта.
+    r"|^\d{4}\s*(г\.?)?\s*[.,]?\s*(Января|Февраля|Марта|Апреля|Мая|Июня|Июля|Августа|"
+    r"Сентября|Октября|Ноября|Декабря)\s+\d{1,2}\.?\s*$"             # 1894 г. Сентября 24.
+    r"|^\d{1,2}(-го)?\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|"
+    r"октября|ноября|декабря|янв\.|февр?\.|мар\.|апр\.|мая|июн\.|июл\.|авг\.|сент\.|"
+    r"окт\.|нояб\.|дек\.)\s*\.?\s*\d{4}\s*(г(ода)?\.?)?\.?\s*$"      # 1 апреля 1903. / 31 окт. 1909.
+    r"|^(Января|Февраля|Марта|Апреля|Мая|Июня|Июля|Августа|Сентября|Октября|"
+    r"Ноября|Декабря)\s+\d{1,2}(-го)?\s+дня\s+\d{4}\s+года\.?$"      # Апреля 12-го дня 1847 года.
+    r"|^\d{4}\s+(Января|Февраля|Марта|Апреля|Мая|Июня|Июля|Августа|Сентября|"
+    r"Октября|Ноября|Декабря)\s+\d{1,2}\.?\s*$",                     # 1844 Мая 30.
+    re.IGNORECASE)
+# «На конверте: …» — почтовые пометки, не подпись, не трогаем
+_ENVELOPE_RE = re.compile(r"^(На конверте|На обороте|На письме|В конверте)\b", re.IGNORECASE)
+
+
+def _name_match(para: str) -> tuple[int, int] | None:
+    """Позиция подписи-фамилии в конце строки, или None."""
+    m = _NAME_END_RE.search(para)
+    if m:
+        return m.start(), m.end()
+    # «Л. Толстой. 1844 Мая 30.» — фамилия + дата-хвост
+    m = _NAME_WITH_DATE_RE.search(para)
+    if m and _DATE_TAIL_RE.search(para):
+        return m.start(), m.end()
+    return None
+
+
+def _pre_name_ok(pre: str) -> bool:
+    """Часть строки ДО фамилии — только титулы/инициалы («Граф Лев », «Ваш
+    Гр. Л. », «Ея Сиятельству Графине », «Léon »). Иначе это текст с подписью
+    в той же строке (телеграмма «Ждешь меня. Что больной. Толстой.») — не трогаем."""
+    if not pre:
+        return True
+    words = pre.split()
+    if not words:
+        return True
+    word_re = re.compile(r"^[А-ЯЁA-Z][а-яёa-zéè]*\.?$")
+    return all(word_re.fullmatch(w) for w in words)
+
+
+def _is_signature_or_date(para: str) -> bool:
+    """True, если короткая строка похожа на подпись или дату (хвост письма)."""
+    if len(para) > SIG_MAX_CHARS or _ENVELOPE_RE.match(para):
+        return False
+    if _OPENING_RE.match(para) or _INITIALS_RE.match(para) or _DATE_RE.match(para):
+        return True
+    m = _name_match(para)
+    if m is None:
+        return False
+    pre = para[:m[0]].strip()
+    return _pre_name_ok(pre)
+
+
+def _filter_letter_signature(meta: dict, paras: list[str]) -> list[str]:
+    """Для писем: убираем ХВОСТОВЫЕ подписи/даты. Останавливаемся на первом
+    не-подходящем абзаце. Может вернуть пустой список (письмо из одной подписи)."""
+    if meta.get("type") != "письмо":
+        return paras
+    out = list(paras)
+    while out and _is_signature_or_date(out[-1]):
+        out.pop()
+    return out
+
+
 def _iter_records(path: str):
     """Отдаёт (meta, [абзацы]) для каждой записи в файле."""
     with open(path, encoding="utf-8") as f:
@@ -216,46 +307,46 @@ def _iter_records(path: str):
 
 
 def _chunk_paragraphs(paras: list[str]) -> list[str]:
-    """Склеиваем абзацы в чанки ~CHUNK_CHARS с небольшим перекрытием."""
+    """1 абзац = 1 чанк. Абзацы короче MIN_CHARS приклеиваются к следующему
+    (хвост из коротких — к предыдущему), чтобы ничего не выпало при эмбеддинге.
+    Абзацы длиннее CHUNK_CHARS*1.5 режутся по предложениям БЕЗ перекрытия."""
     chunks: list[str] = []
-    buf: list[str] = []
-    buf_len = 0
+    short_buf: list[str] = []
     for para in paras:
-        # если один абзац сам по себе огромный — режем его по предложениям
+        if len(para) < MIN_CHARS:
+            short_buf.append(para)          # копим короткие — серия коротких
+            continue                        # абзацев вся уйдёт в следующий
+        if short_buf:                       # короткие + следующий абзац → один чанк
+            para = "\n\n".join(short_buf + [para])
+            short_buf = []
         if len(para) > CHUNK_CHARS * 1.5:
-            if buf:
-                chunks.append("\n\n".join(buf))
-                buf, buf_len = [], 0
             chunks.extend(_split_long(para))
-            continue
-        if buf_len + len(para) > CHUNK_CHARS and buf:
-            chunks.append("\n\n".join(buf))
-            # перекрытие: оставляем последние N абзацев
-            buf = buf[-CHUNK_OVERLAP_PARAS:] if CHUNK_OVERLAP_PARAS else []
-            buf_len = sum(len(p) for p in buf)
-        # перекрытие + новый абзац не влезают в чанк — сбрасываем перекрытие,
-        # чтобы чанк не разрастался вдвое за счёт дубля
-        if buf_len + len(para) > CHUNK_CHARS and buf:
-            buf, buf_len = [], 0
-        buf.append(para)
-        buf_len += len(para)
-    if buf:
-        chunks.append("\n\n".join(buf))
+        else:
+            chunks.append(para)
+    if short_buf:                           # хвост из коротких
+        tail = "\n\n".join(short_buf)
+        if chunks and len(chunks[-1]) + len(tail) + 2 <= CHUNK_CHARS * 1.5:
+            chunks[-1] = chunks[-1] + "\n\n" + tail
+        elif len(tail) >= MIN_CHARS:
+            chunks.append(tail)             # самодостаточный хвост — отдельным чанком
+        elif chunks:
+            # короткий хвост к последнему чанку: лучше лёгкое превышение окна,
+            # чем потеря текста при эмбеддинге
+            chunks[-1] = chunks[-1] + "\n\n" + tail
+        else:
+            chunks.append(tail)             # вырожденный случай: вся запись < MIN_CHARS
     return chunks
 
 
 def _split_long(para: str) -> list[str]:
+    """Делит длинный абзац по предложениям на куски ~CHUNK_CHARS без перекрытий."""
     sents = re.split(r"(?<=[.!?…])\s+", para)
     out, buf, blen = [], [], 0
     for s in sents:
         if blen + len(s) > CHUNK_CHARS and buf:
             out.append(" ".join(buf))
-            # перекрытие: последнее предложение переходит в следующий кусок,
-            # чтобы граница не рвала контекст
-            buf, blen = buf[-1:], len(buf[-1])
-        # перекрытие не влезает (гигантское предложение) — без него
-        if blen + len(s) > CHUNK_CHARS and buf:
             buf, blen = [], 0
+        # гигантское предложение длиннее чанка — идёт отдельным куском как есть
         buf.append(s)
         blen += len(s)
     if buf:
@@ -263,13 +354,11 @@ def _split_long(para: str) -> list[str]:
     return out
 
 
-def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
-    """
-    Читает все tom*.txt в data/, режет на чанки.
-    include_types — например {"проза"} чтобы взять только художественные произведения.
-    None = всё.
-    """
-    chunks: list[Chunk] = []
+def _iter_indexed_records(include_types: set[str] | None = None):
+    """Единый порядок перечисления записей: файлы sorted(glob), записи по порядку,
+    одинаковые фильтры include_types/junk. doc_id — сквозной счётчик записей.
+    Его используют И load_chunks, И load_docs — нумерация совпадает по построению."""
+    doc_id = 0
     # tom*.txt — художественные произведения (EPUB, legacy); tei_*.txt — письма
     # и дневники из TEI-корпуса tolstoydigital (см. scripts/tei_to_txt.py).
     files = sorted(
@@ -282,11 +371,40 @@ def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
                 continue
             if _is_junk_record(meta):
                 continue
-            for i, ctext in enumerate(_chunk_paragraphs(paras)):
-                m = dict(meta)
-                m["chunk"] = str(i)
-                chunks.append(Chunk(text=ctext, meta=m))
+            yield doc_id, meta, paras
+            doc_id += 1
+
+
+def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
+    """
+    Читает все tom*.txt и tei_*.txt в data/, режет на чанки (1 абзац = 1 чанк).
+    include_types — например {"письмо"} чтобы взять только письма. None = всё.
+    """
+    chunks: list[Chunk] = []
+    for doc_id, meta, paras in _iter_indexed_records(include_types):
+        if meta.get("type") == "письмо":
+            # подписи/даты в конце письма не идут в чанки (но остаются в load_docs)
+            paras = _filter_letter_signature(meta, paras)
+        for i, ctext in enumerate(_chunk_paragraphs(paras)):
+            m = dict(meta)
+            m["chunk"] = str(i)
+            m["doc"] = str(doc_id)  # строка: "0" — truthy в JS на фронте
+            chunks.append(Chunk(text=ctext, meta=m))
     return chunks
+
+
+def load_docs(include_types: set[str] | None = None) -> list[dict]:
+    """Полные тексты записей (БЕЗ фильтра подписей) для эндпоинта /doc.
+    doc_id совпадает с meta["doc"] в чанках из load_chunks — общий итератор."""
+    docs = []
+    for doc_id, meta, paras in _iter_indexed_records(include_types):
+        docs.append({
+            "doc": str(doc_id),
+            "label": source_label(meta),
+            "text": "\n\n".join(paras),
+            "meta": meta,
+        })
+    return docs
 
 
 def source_label(meta: dict) -> str:
@@ -332,6 +450,8 @@ if __name__ == "__main__":
     print("По типу:", dict(by_type))
     lens = [len(c.text) for c in cs]
     print(f"Длина чанка: min={min(lens)} avg={sum(lens)//len(lens)} max={max(lens)}")
+    print(f"Документов (для /doc): {len(load_docs())}")
+    print(f"Чанков без meta['doc']: {sum(1 for c in cs if 'doc' not in c.meta)}")
     print("\nПример:")
     print(source_label(cs[0].meta))
     print(cs[0].text[:300])

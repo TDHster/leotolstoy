@@ -46,9 +46,9 @@
 |---|---|
 | `scripts/epub_to_txt.py` | **legacy**: EPUB → `data/tom*.txt` (до переезда на digital Tolstoy; проза tom01–45 пока оттуда) |
 | `scripts/tei_to_txt.py` | TEI/XML писем и дневников (tolstoydigital/TEI, CC BY-SA) → `data/tei_letters.txt`, `data/tei_diaries.txt` |
-| `scripts/corpus.py` | чтение `data/tom*.txt` + `data/tei_*.txt`, нарезка на чанки + метаданные |
+| `scripts/corpus.py` | чтение `data/tom*.txt` + `data/tei_*.txt`, нарезка на чанки (1 абзац = 1 чанк) + метаданные, фильтр подписей писем, `load_docs` (полные тексты для /doc) |
 | `scripts/embed.py` | общий модуль эмбеддингов (сборка и сервер) |
-| `scripts/build_embeddings.py` | сборка локального индекса → `index/vectors.npy` + `chunks.json` |
+| `scripts/build_embeddings.py` | сборка локального индекса → `index/vectors.npy` + `chunks.json` + `docs.json` |
 | `scripts/build_embeddings_api.py` | сборка индекса внешней моделью (Qwen через OpenRouter) → `index.<model>/` |
 | `server/embedders.py` | LocalEmbedder (fastembed) + OpenRouterEmbedder (API) — выбор по metadata индекса |
 | `scripts/entrypoint.sh` | Docker entrypoint: включает TLS, если смонтированы сертификаты (устарело, TLS теперь на Caddy) |
@@ -56,9 +56,9 @@
 | `scripts/setup_caddy.sh` | установка и настройка Caddy на сервере Ubuntu |
 | `Caddyfile` | конфигурация Caddy reverse proxy (копируется на сервер в `/etc/caddy/Caddyfile`) |
 | `CADDY_SETUP.md` | инструкция по переходу на Caddy + домен verbatis.ru |
-| `server/app.py` | FastAPI: auth, rate limit, RAG, вызов LLM |
+| `server/app.py` | FastAPI: auth, rate limit, RAG, вызов LLM, `GET /doc/{id}` (полный текст источника) |
 | `server/retriever.py` | загрузка индекса + косинусный поиск |
-| `server/static/index.html` | фронт (чат, показ фрагментов-источников) |
+| `server/static/index.html` | фронт (чат, показ фрагментов-источников, клик по фрагменту → модалка с полным текстом) |
 | `tests/` | pytest: corpus, retriever, API (LLM/эмбеддер замоканы) |
 | `deploy.sh` + `.deploy` | деплой: прогон тестов → rsync → compose на сервере |
 
@@ -66,9 +66,20 @@
 
 - `index/vectors.npy` — массив N×384 float32, L2-нормализован (MiniLM-L12-v2).
 - **Письма и дневники — из TEI-корпуса tolstoydigital** (`data/tei_letters.txt`,
-  `data/tei_diaries.txt`; ~52.7 тыс. чанков при EMBED_TYPES=письмо,дневник).
+  `data/tei_diaries.txt`; ~54.7 тыс. чанков при EMBED_TYPES=письмо,дневник).
   Метаданные: адресат, дата, место, № письма в томе, титул, библиографическая
   ссылка ПСС, страницы, год издания, признак дореформенной орфографии.
+- **Чанкинг (сентябрь 2026): 1 абзац = 1 чанк.** Абзацы длиннее ~675 симв. режутся
+  по предложениям БЕЗ перекрытий; короткие (<40 симв., иначе выпали бы при
+  эмбеддинге) склеиваются со следующим абзацем (хвост — с предыдущим/отдельным
+  чанком). Дублей на стыках чанков нет.
+- **Фильтр подписей/дат в письмах** (уровень чанков, данные не тронуты): хвостовые
+  короткие строки-подписи («Л. Толстой.», «Граф Лев Толстой.», «Л. Т.», «Léon
+  Tolstoï.», «Ваш Гр. Л. Толстой.», формулы «С совершенным почтением…») и даты
+  («31 окт. 1909.», «Апреля 12-го дня 1847 года.») вырезаются из чанков писем
+  (`corpus._filter_letter_signature`). Консервативно: только хвост, только ≤80
+  симв., явные паттерны; телеграммы с подписью в той же строке («Ждешь меня…
+  Толстой.») НЕ трогаются.
 - Проза (tom01–45) — из EPUB, legacy; в индексе её нет (фильтр EMBED_TYPES).
   Старые EPUB-тома писем/дневников (46–90) лежат в `data/unused_tom/` — вне
   корпуса (глоб читает только `data/*.txt`, не подкаталоги).
@@ -77,13 +88,19 @@
   обнуляло ~39% компонент и искажало топ-10. `EMBED_INDEX_DTYPE` позволяет собрать
   float16 (716 МБ) при нехватке памяти. `chunks.json` — symlink на
   `index/chunks.json`, `metadata.json` помечает `api: true` / `dtype` / `provider`.
-- `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год).
-  Размер: ~100 МБ для ~52.7 тыс. чанков (письма+дневники).
+- `index/chunks.json` — тексты фрагментов + метаданные (том, тип, адресат, год,
+  `doc` — id полного текста, `chunk` — № чанка в записи). Размер: ~100 МБ для
+  ~54.7 тыс. чанков (письма+дневники).
+- `index/docs.json` — полные тексты записей (письмо целиком / запись дневника,
+  БЕЗ фильтра подписей) для `GET /doc/{id}`: ~13.4 тыс. записей, ~20-30 МБ.
+  Создаётся ТОЛЬКО локальным билдером (`make embeddings`), в том же прогоне, что
+  и chunks.json. `doc_id` — сквозной счётчик записей, совпадает с `meta["doc"]`
+  в chunks.json (общий итератор `corpus._iter_indexed_records`).
 - Связь по позиции: i-й вектор ↔ i-й элемент chunks.json.
 - Индексы собираются там же, где используются: локальный — `make embeddings`,
   внешний — `make embeddings-qwen` (на сервере). В `.rsyncignore` — `index*/`,
   deploy.sh индексы не копирует и не удаляет.
-- Векторизация писем и дневников (~52.7 тыс. чанков) занимает ~10-20 минут на обычном CPU.
+- Векторизация писем и дневников (~54.7 тыс. чанков) занимает ~10-20 минут на обычном CPU.
 
 ### Альтернатива: векторизация через OpenRouter API (2026)
 
@@ -132,7 +149,8 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
 
 Провайдер LLM: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (примеры в `.env.example`;
 старые `OPENROUTER_*` работают как fallback). Auth: `APP_USER`, `APP_PASS`.
-Лимиты: `RATE_LIMIT_CHAT`, `RATE_LIMIT_LOGIN`, `MAX_MESSAGE_CHARS`, `AUTH_FAIL_DELAY`.
+Лимиты: `RATE_LIMIT_CHAT`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_DOC` (GET /doc/{id}),
+`MAX_MESSAGE_CHARS`, `AUTH_FAIL_DELAY`.
 Логи: `LOG_LEVEL`, `LOG_QUERIES` (текст запросов — ПД, по умолчанию выкл).
 
 ## ⚠️ Подводные камни (важно)
@@ -161,6 +179,15 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
   и пересобираются на сервере (`make embeddings` / `make embeddings-qwen`).
   Если каталог индекса отсутствует или повреждён при старте — сервер
   запускается без этой модели, остальные работают.
+- **Пересборка локального индекса рассинхронизирует Qwen**: `index.qwen3-embedding-8b/chunks.json`
+  — symlink на `index/chunks.json`, а его `vectors.npy` — старые векторы. После
+  `make embeddings` число чанков меняется → Retriever падает на assert «рассинхрон»,
+  и выбор Qwen в UI отдаёт 503. Лечится пересборкой `make embeddings-qwen` на сервере.
+  Qwen-билдер использует тот же `corpus.load_chunks` — наследует новую нарезку
+  и фильтр подписей автоматически.
+- **`docs.json` создаёт только локальный билдер**: если на сервере собрать только
+  `make embeddings-qwen`, `GET /doc/{id}` будет отдавать 404 (с подсказкой) —
+  для модалки полных текстов нужен прогон `make embeddings`.
 - **Секреты**: `.env*`, `.deploy`, `certs/`, `favicon.ico` в `.gitignore`; в
   `.rsyncignore` их НЕТ (должны уехать на сервер). EPUB-издание 1978 г. под
   авторским правом — тоже не в git (`data/` игнорируется).
