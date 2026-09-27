@@ -35,6 +35,30 @@ _idx = os.environ.get("EMBED_INDEX_DIR", "index")
 INDEX_DIR = _idx if os.path.isabs(_idx) else os.path.join(ROOT, _idx)
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n = n % 100
+    if 11 <= n <= 14:
+        return many
+    n %= 10
+    if n == 1:
+        return one
+    if 2 <= n <= 4:
+        return few
+    return many
+
+
+def _fmt_eta(eta_min: float) -> str:
+    """ETA для прогресс-бара: до часа — только минуты, иначе «X час(а/ов) Y минут(ы)»."""
+    total = max(1, round(eta_min))
+    if total < 60:
+        return f"ETA: {total} {_plural(total, 'минута', 'минуты', 'минут')}"
+    h, m = divmod(total, 60)
+    out = f"ETA: {h} {_plural(h, 'час', 'часа', 'часов')}"
+    if m:
+        out += f" {m} {_plural(m, 'минута', 'минуты', 'минут')}"
+    return out
+
+
 def main() -> int:
     include = None
     # можно ограничить типы: EMBED_TYPES="письмо" -> только письма
@@ -85,7 +109,7 @@ def main() -> int:
         bar = '█' * filled + '░' * (bar_width - filled)
         eta_min = eta / 60
         print(f"\r[{bar}] {pct:.1f}% | {processed}/{len(texts)} | "
-              f"{rate:.1f} чанков/с | ETA: {eta_min:.1f} мин", end='', flush=True)
+              f"{rate:.1f} чанков/с | {_fmt_eta(eta_min)}", end='', flush=True)
 
     print()  # новая строка после прогресс-бара
 
