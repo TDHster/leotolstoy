@@ -21,3 +21,14 @@ deploy.sh
 .rsyncignore
 # самоподписанные сертификаты больше не нужны (TLS на Caddy)
 certs/
+# визуализация: .venv и out/ НЕ возим.
+#   .venv — сотни МБ, на сервере собирается своим uv sync (uv.lock едет).
+#   out/ — серверная сборка авторитетна (обновляется make visualization на
+#   сервере после make embeddings); исключение защищает её от перезаписи
+#   локальной и от удаления rsync --delete. Первый раз out/ докладывает
+#   deploy.sh (bootstrap), если на сервере её ещё нет.
+#   cache/ — возим намеренно: серверный билд инкрементальный, а штамп индекса
+#   (cache/index_stamp.txt) защищает от переиспользования кэша чужого индекса.
+visualization/.venv/
+visualization/out/
+visualization/src/__pycache__/

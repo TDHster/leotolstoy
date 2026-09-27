@@ -1,4 +1,4 @@
-.PHONY: help install convert tei tei-fetch embeddings embeddings-gpu embeddings-qwen run clean deploy-index lock
+.PHONY: help install convert tei tei-fetch embeddings embeddings-gpu embeddings-qwen visualization run clean deploy-index lock
 
 help:
 	@echo "Толстой-чат — команды (через uv):"
@@ -9,6 +9,7 @@ help:
 	@echo "  make embeddings  — собрать индекс из data/*.txt -> index/ (CPU, медленно)"
 	@echo "  make embeddings-gpu — собрать индекс на GPU (требует CUDA, быстро)"
 	@echo "  make embeddings-qwen — собрать индекс через OpenRouter API (Qwen3-8B, быстро, платно)"
+	@echo "  make visualization — собрать/пересобрать визуализацию из index/ (сам определит, сменился ли индекс; работает и на сервере)"
 	@echo "  make run         — запустить сервер локально (http://localhost:8000)"
 	@echo "  make deploy-index HOST=user@server DIR=/path — scp индекса на сервер"
 	@echo "  make lock        — обновить uv.lock"
@@ -59,6 +60,14 @@ embeddings-qwen:
 		echo "🔄 Перезапуск Docker-контейнеров (force-recreate — подхватить новый индекс)..."; \
 		docker compose up -d --force-recreate; \
 	fi
+
+# Визуализация эволюции тем: статические страницы из index/ (visualization/out/).
+# Работает и локально (просмотр двойным кликом), и на сервере — там запускать
+# после make embeddings, чтобы https://verbatis.ru/viz/ показала свежую карту.
+# run.py сам сравнивает штамп index/ с кэшем: сменился индекс — пересчитает всё
+# (UMAP + кластеры + LLM-названия ~15–30 мин на сервере), нет — отработает за секунды.
+visualization:
+	cd visualization && uv sync && uv run python run.py
 
 run:
 	uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 1

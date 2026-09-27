@@ -172,6 +172,13 @@ visualization/
 читать» под каждой вкладкой. `--split` — только `out/map.html` и
 `out/alluvial.html`, без обёртки.
 
+**Запуск:** `make visualization` из корня проекта (или `uv run python run.py`
+отсюда). run.py сверяет штамп index/ (mtime+size векторов/чанков) с кэшем:
+индекс сменился — полный пересчёт, нет — секунды из кэша. Работает одинаково
+локально (просмотр двойным кликом по out/index.html) и на сервере (там — после
+`make embeddings`, для обновления https://verbatis.ru/viz/; статику отдаёт
+Caddy, route /viz/* в корневом Caddyfile, deploy.sh возит его и делает reload).
+
 ## 7. Критерии приёмки
 
 1. `uv sync && uv run python run.py` на чистом клоне собирает `out/index.html`

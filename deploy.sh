@@ -82,6 +82,44 @@ fi
 if rsync -avzP --delete -e "ssh -p $SSH_PORT" "${RSYNC_EXCLUDE[@]}" ./ "$SSH_HOST:$PROJECT_DIR/"; then
     echo "✅ Sync completed successfully."
 
+    # --- Caddy: конфиг живёт в репо и возится на сервер (Caddy — системный
+    # сервис на хосте, НЕ в docker: compose-рестарт его конфиг не применит).
+    if [ -f Caddyfile ]; then
+        if rsync -e "ssh -p $SSH_PORT" Caddyfile "$SSH_HOST:/etc/caddy/Caddyfile"; then
+            echo "✅ Caddyfile обновлён, reload Caddy..."
+            if ! ssh -p "$SSH_PORT" "$SSH_HOST" \
+                "caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || systemctl reload caddy"; then
+                echo "❌ Не удалось перезагрузить Caddy (route /viz может не заработать)" >&2
+            else
+                echo "✅ Caddy перезагружен: https://verbatis.ru/viz/"
+            fi
+        else
+            echo "❌ Ошибка копирования Caddyfile" >&2
+            exit 1
+        fi
+    fi
+
+    # --- Визуализация: bootstrap статики на сервере. Основной rsync out/ не
+    # возит (см. .rsyncignore): после первого деплоя страница обновляется на
+    # сервере командой `make visualization` (после make embeddings там же).
+    # $PROJECT_DIR раскрывается локально (в ssh-команде кавычек вокруг него нет).
+    if ssh -p "$SSH_PORT" "$SSH_HOST" "test -f $PROJECT_DIR/visualization/out/index.html"; then
+        echo "ℹ️  Серверная визуализация уже есть — локальная out/ не перезаписывает её"
+    elif [ -f visualization/out/index.html ]; then
+        echo "📦 Первая выкладка визуализации (на сервере её ещё нет)..."
+        rsync -a -e "ssh -p $SSH_PORT" visualization/out/ "$SSH_HOST:$PROJECT_DIR/visualization/out/"
+        echo "✅ Статика визуализации выложена: https://verbatis.ru/viz/"
+    else
+        echo "⚠️  Локально нет visualization/out/index.html — страница не собрана." \
+             "Соберите: make visualization, затем повторите деплой." >&2
+    fi
+
+    # --- uv на сервере: нужен для `make visualization` там (после make embeddings).
+    if ! ssh -p "$SSH_PORT" "$SSH_HOST" "command -v uv >/dev/null"; then
+        echo "⚠️  На сервере нет uv — `make visualization` там не заработает." \
+             "Установите один раз: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    fi
+
     echo "🚀 Running command on server: $REMOTE_COMMAND"
     echo "Note: Press Ctrl+C to exit logs (if running)"
 

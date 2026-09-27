@@ -152,10 +152,23 @@ make tei          # tei-fetch + convert
 make embeddings   # data/*.txt → index/ (локальная модель; на проде — на сервере)
 make embeddings-gpu # то же на GPU (требует CUDA)
 make embeddings-qwen # сборка внешней моделью (Qwen через OpenRouter)
+make visualization # визуализация тем: index/ → visualization/out/ (локально ИЛИ на сервере после make embeddings)
 make run          # локальный сервер (HTTP, http://localhost:8000)
 uv run pytest     # тесты (~0.3с, без сети/модели)
-./deploy.sh       # деплой (тесты → rsync → docker compose на сервере; индексы НЕ возит)
+./deploy.sh       # деплой (тесты → rsync → Caddy reload → docker compose на сервере; индексы НЕ возит)
 ```
+
+**Визуализация (visualization/)**: статические страницы (карта смыслов + потоки
+тем) собираются из index/ командой `make visualization` — run.py сравнивает
+штамп index/ с кэшем и при смене индекса пересчитывает всё (UMAP + кластеры +
+LLM-названия, ~15–30 мин на 2 ядрах сервера), иначе отрабатывает за секунды.
+URL: https://verbatis.ru/viz/ — статику отдаёт Caddy (route в Caddyfile, мимо
+FastAPI, публично — там только тексты Толстого). После обновления индекса на
+сервере (`make embeddings`) запустить там же `make visualization` — страница
+обновится (out/ на сервере авторитетна: deploy.sh её не перезаписывает,
+bootstrap только при первом деплое; см. .rsyncignore). Для билда на сервере
+нужен uv (установлен: /usr/local/bin/uv). Память сервера впритык (3.8 ГиБ):
+билд — ручная команда, не часть deploy.sh.
 
 Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restart`, `down`.
 

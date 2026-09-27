@@ -54,6 +54,28 @@ def main() -> None:
         for name in FORCE_TARGETS[step][1]:
             (load.OUT_DIR / name).unlink(missing_ok=True)
 
+    # Штамп индекса: если index/ сменился с прошлого прогона — кэш и out/
+    # устарели, пересчитываем всё. Работает и локально, и на сервере
+    # (там после make embeddings запускается make visualization).
+    stamp_path = load.CACHE_DIR / "index_stamp.txt"
+    index_files = [
+        load.INDEX_DIR / "vectors.npy",
+        load.INDEX_DIR / "chunks.json",
+        load.INDEX_DIR / "metadata.json",
+    ]
+    current_stamp = "\n".join(
+        f"{f.name} {f.stat().st_mtime_ns} {f.stat().st_size}"
+        for f in index_files
+        if f.exists()
+    )
+    old_stamp = stamp_path.read_text(encoding="utf-8") if stamp_path.exists() else ""
+    if old_stamp != current_stamp:
+        if old_stamp:
+            print("=== Индекс сменился — полный пересчёт (кэш и out/ сброшены) ===")
+        # старый кэш/out без штампа или от другого индекса — не доверяем
+        for p in list(load.CACHE_DIR.glob("*")) + list(load.OUT_DIR.glob("*")):
+            p.unlink()
+
     timings: dict[str, float] = {}
 
     def timed(name: str) -> None:
@@ -68,6 +90,7 @@ def main() -> None:
     summary = load.summarize(data)
     print(summary)
     load.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    stamp_path.write_text(current_stamp, encoding="utf-8")
     (load.CACHE_DIR / "data_report.txt").write_text(summary, encoding="utf-8")
     done("load")
 

@@ -1,0 +1,53 @@
+verbatis.ru {
+    # Статическая визуализация эволюции тем (собирается make visualization,
+    # лежит в visualization/out/). Отдаёт сам Caddy, мимо FastAPI.
+    # Внутри index.html использует iframe'ы на свои же map.html/alluvial.html —
+    # поэтому X-Frame-Options "DENY" задан НЕ на уровне сайта, а внутри
+    # handle-блока приложения ниже.
+    handle_path /viz/* {
+        root * /opt/leotolstoy/visualization/out
+        file_server
+    }
+
+    # Приложение (чат): всё, что не /viz/*
+    handle {
+        # Приложение не должно быть встраиваемо в iframe на чужих сайтах
+        header X-Frame-Options "DENY"
+
+        # Reverse proxy с форвардингом заголовков
+        reverse_proxy localhost:8000 {
+            # Форвардим реальный IP клиента в приложение
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Логи
+    log {
+        output file /var/log/caddy/verbatis.log
+        format json
+    }
+
+    # Общие заголовки безопасности (для всех маршрутов)
+    header {
+        # Включить HSTS (только после проверки что всё работает!)
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Защита от XSS
+        X-Content-Type-Options "nosniff"
+        # Удаляем заголовок Server для безопасности
+        -Server
+    }
+}
+
+# Пример для добавления других сервисов на поддоменах:
+# api.verbatis.ru {
+#     reverse_proxy localhost:9000
+# }
+#
+# admin.verbatis.ru {
+#     reverse_proxy localhost:9001
+#     basicauth {
+#         # Генерировать: caddy hash-password
+#         admin $2a$14$...hash...
+#     }
+# }
