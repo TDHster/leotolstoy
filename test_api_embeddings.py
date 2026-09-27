@@ -63,4 +63,4 @@ except Exception as e:
     sys.exit(1)
 
 print(f"\n🎉 Все тесты прошли! API работает корректно.")
-print(f"   Можно запускать: make embeddings-qwen")
+print(f"   Запуск билдера: uv run python scripts/build_embeddings_api.py (таргет make embeddings-qwen удалён — Qwen отключён)")

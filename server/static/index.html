@@ -153,7 +153,7 @@
 <body>
 <header>
   <h1>Беседа с Л. Н. Толстым</h1>
-  <p>Ответы составляются по его письмам и дневникам</p>
+  <p>Ответы составляются по его письмам, дневникам, записным книжкам, статьям и трактатам</p>
 </header>
 
 <div class="model-selector">
@@ -314,7 +314,9 @@ function addSources(list, modelName) {
     if (s.doc) {
       const idx = docSnippets.length;
       docSnippets.push({doc: s.doc, text: s.text, type: s.type});
-      const linkText = s.type === 'дневник' ? 'открыть запись дневника' : 'открыть письмо целиком';
+      const linkText = s.type === 'дневник' ? 'открыть запись дневника'
+                     : s.type === 'письмо' ? 'открыть письмо целиком'
+                     : 'открыть текст целиком';
       openLink = `<div class="doc-open"><a class="doclink" data-idx="${idx}" href="#">${linkText}</a></div>`;
     }
     return `
@@ -343,6 +345,8 @@ function docMetaLine(m) {
   if (m.pages) parts.push('с. ' + m.pages);
   if (m.year) parts.push(m.year);
   if (m.ed_year) parts.push('изд. ' + m.ed_year);
+  if (m.age != null && m.age !== '') parts.push('возраст: ' + m.age);
+  if (m.in_ss22) parts.push('в 22-томнике');
   return parts.join(' · ');
 }
 

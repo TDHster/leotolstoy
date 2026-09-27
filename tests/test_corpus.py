@@ -1,4 +1,5 @@
 """Тесты парсинга/чанкинга корпуса (scripts/corpus.py) — без сети и модели."""
+import json
 import os
 import sys
 
@@ -7,23 +8,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import corpus  # noqa: E402
-
-
-def test_parse_meta_basic():
-    line = "### META | vol=18 | type=письмо | year=1849 | num=4 | to=С. Н. Толстому"
-    meta = corpus._parse_meta(line)
-    assert meta["vol"] == "18"
-    assert meta["type"] == "письмо"
-    assert meta["year"] == "1849"
-    assert meta["num"] == "4"
-    assert meta["to"] == "С. Н. Толстому"
-
-
-def test_parse_meta_ignores_garbage():
-    meta = corpus._parse_meta("### META | vol=1 | brokenpart | k=v")
-    assert meta["vol"] == "1"
-    assert meta["k"] == "v"
-    assert "brokenpart" not in meta
 
 
 def test_chunk_paragraphs_respects_size():
@@ -132,6 +116,18 @@ def test_source_label_diary():
     assert "1886" in label
 
 
+@pytest.mark.parametrize("meta,expected", [
+    ({"type": "статья", "title": "Не могу молчать", "year": "1908"},
+     "Статья: Не могу молчать, 1908"),
+    ({"type": "трактат", "title": "Что такое искусство?", "year": "1897–1898"},
+     "Трактат: Что такое искусство?, 1897–1898"),
+    ({"type": "записная книжка", "title": "Записная книжка, 23 мая 1856 г.", "year": "1856"},
+     "Записная книжка: Записная книжка, 23 мая 1856 г., 1856"),
+])
+def test_source_label_article_treatise_notebook(meta, expected):
+    assert corpus.source_label(meta) == expected
+
+
 def test_is_junk_record_filters_reference_matter():
     # справочный аппарат изданий — мусор для RAG
     assert corpus._is_junk_record({"entry": "УКАЗАТЕЛЬ СОБСТВЕННЫХ ИМЕН", "type": "дневник"})
@@ -143,6 +139,49 @@ def test_is_junk_record_filters_reference_matter():
     assert not corpus._is_junk_record({"to": "С. Н. Толстому", "type": "письмо"})
     assert not corpus._is_junk_record({"entry": "Примечания", "type": "дневник"})
     assert not corpus._is_junk_record({})
+
+
+# --- метаданные Verbatis -----------------------------------------------------
+
+def test_verbatis_meta_max_fields():
+    rec = {
+        "id": "v59_001", "date": "1844-05-29", "date_start": "1844-05-29",
+        "date_end": "1844-05-29", "age": 15, "title": "Письмо Ректору Казанского университета.",
+        "volume": "59", "pages": "3–5", "file": "texts/letters/v59_001.xml",
+        "in_ss22": False, "addressee": "Лобачевский Николай Иванович",
+        "place": "Казань", "number": "1", "sent": "sent", "text": "тело письма",
+    }
+    meta = corpus._verbatis_meta(rec, "письмо")
+    # все сырые поля Verbatis сохранены как есть («максимум метаданных»),
+    # КРОМЕ text — текст живёт в абзацах, дублировать его в meta нельзя
+    for k, v in rec.items():
+        if k == "text":
+            assert "text" not in meta
+        else:
+            assert meta[k] == v
+    # составные ключи для UI
+    assert meta["type"] == "письмо"
+    assert meta["vol"] == "59"
+    assert meta["to"] == "Лобачевский Николай Иванович"
+    assert meta["num"] == "1"
+    assert meta["year"] == "1844"
+    assert meta["entry"] == "1. Лобачевский Николай Иванович, 1844, Казань, с. 3–5"
+
+
+def test_verbatis_meta_diary_plain_title_no_entry():
+    # title ровно «Дневник» — entry не заводим (как раньше в tei_to_txt)
+    meta = corpus._verbatis_meta(
+        {"title": "Дневник", "date": "1847-03-18",
+         "date_start": "1847-03-18", "date_end": "1847-03-18"}, "дневник")
+    assert "entry" not in meta
+    assert meta["year"] == "1847"
+
+
+def test_year_range_and_fallbacks():
+    assert corpus._year_of({"date_start": "1890", "date_end": "1893"}) == "1890–1893"
+    assert corpus._year_of({"date_start": "1890-03-15", "date_end": "1890-09-01"}) == "1890"
+    assert corpus._year_of({"date": "1904"}) == "1904"
+    assert corpus._year_of({}) is None
 
 
 # --- фильтр подписей/дат -----------------------------------------------------
@@ -210,38 +249,92 @@ def test_filter_letter_signature_whole_record():
     assert corpus._filter_letter_signature({"type": "письмо"}, ["Л. Толстой."]) == []
 
 
-# --- doc_id и полные тексты --------------------------------------------------
+# --- чтение jsonl корпуса Verbatis -------------------------------------------
 
-def _write_corpus_files(tmp_path):
-    (tmp_path / "tei_letters.txt").write_text(
-        "### META | vol=59 | type=письмо | num=1 | to=Лобачевский | year=1844\n"
-        "тело письма А с достаточно длинным содержанием\n\nЛ. Толстой.\n\n"
-        "### META | vol=59 | type=письмо | num=2 | year=1844\n"
-        "тело письма Б с достаточно длинным содержанием\n\n"
-        "### META | vol=59 | type=письмо | entry=УКАЗАТЕЛЬ СОБСТВЕННЫХ ИМЕН\n"
-        "мусорная запись\n\n",
-        encoding="utf-8")
-    (tmp_path / "tei_diaries.txt").write_text(
-        "### META | vol=46 | type=дневник | date=1847-03-17 | year=1847\n"
-        "запись дневника Ц с достаточно длинным содержанием\n\n"
-        "### META | vol=46 | type=дневник | date=1847-03-18 | year=1847\n"
-        "запись дневника Д с достаточно длинным содержанием\n\n31 окт. 1909.\n\n",
-        encoding="utf-8")
-    (tmp_path / "tom01.txt").write_text(
-        "### META | vol=1 | type=проза | title=Проза\n"
-        "прозаическая запись с достаточно длинным содержанием\n\n",
-        encoding="utf-8")
+def _letter(rec_id, number=None, addressee=None, title=None, text=""):
+    rec = {
+        "id": rec_id,
+        "date": "1844-05-29",
+        "date_start": "1844-05-29",
+        "date_end": "1844-05-29",
+        "age": 15,
+        "title": title or f"Письмо №{number}",
+        "volume": "59",
+        "pages": "3–5",
+        "file": f"texts/letters/{rec_id}.xml",
+        "in_ss22": False,
+        "sent": "sent",
+        "text": text,
+    }
+    if number is not None:
+        rec["number"] = str(number)
+    if addressee:
+        rec["addressee"] = addressee
+        rec["place"] = "Казань"
+    return rec
+
+
+def _write_verbatis_files(tmp_path):
+    """Мини-корпус Verbatis: письма, дневники, статья + *_for_embedding (маркер)."""
+    raw = tmp_path / "verbatis" / "data" / "raw" / "tolstoy"
+    raw.mkdir(parents=True)
+
+    letters = [
+        _letter("v59_001", number=1, addressee="Лобачевский Николай Иванович",
+                text="тело письма А с достаточно длинным содержанием\n\nЛ. Толстой."),
+        _letter("v59_002", number=2, addressee=None,
+                text="тело письма Б с достаточно длинным содержанием"),
+        _letter("junk", number=None, addressee=None, title="УКАЗАТЕЛЬ СОБСТВЕННЫХ ИМЕН",
+                text="мусорная запись"),
+    ]
+    with open(raw / "tolstoy_letters.jsonl", "w", encoding="utf-8") as f:
+        for rec in letters:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    diaries = [
+        {"id": "v46_001", "date": "1847-03-17", "date_start": "1847-03-17",
+         "date_end": "1847-03-17", "age": 18, "title": "Тетрадь А. Дневник",
+         "volume": "46", "pages": "3–4", "file": "texts/diaries/v46_001.xml",
+         "in_ss22": True,
+         "text": "запись дневника Ц с достаточно длинным содержанием\n\n31 окт. 1909."},
+        {"id": "v46_002", "date": "1847-03-18", "date_start": "1847-03-18",
+         "date_end": "1847-03-18", "age": 18, "title": "Дневник",
+         "volume": "46", "pages": "5", "file": "texts/diaries/v46_002.xml",
+         "in_ss22": True,
+         "text": "запись дневника Д с достаточно длинным содержанием"},
+    ]
+    with open(raw / "tolstoy_diaries.jsonl", "w", encoding="utf-8") as f:
+        for rec in diaries:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    with open(raw / "tolstoy_articles.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "id": "v01_001", "date": "1841", "date_start": "1841", "date_end": "1841",
+            "age": 12, "title": "Amour de la patrie", "volume": "1", "pages": "215-216",
+            "file": "texts/works/v01_001.xml", "in_ss22": False,
+            "text": "статья с достаточно длинным содержанием",
+        }, ensure_ascii=False) + "\n")
+
+    # *_for_embedding.jsonl корпус не читает — это маркер для проверки
+    with open(raw / "tolstoy_articles_for_embedding.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "id": "marker", "title": "МАРКЕР-FOR-EMBEDDING",
+            "text": "этот файл корпус не читает",
+            "embedding_input": "Дата: 1841\n\nэтот файл корпус не читает",
+        }, ensure_ascii=False) + "\n")
 
 
 def test_load_chunks_docs_doc_ids_align(tmp_path, monkeypatch):
     monkeypatch.setattr(corpus, "DATA_DIR", str(tmp_path))
-    _write_corpus_files(tmp_path)
+    _write_verbatis_files(tmp_path)
 
     include = {"письмо", "дневник"}
     chunks = corpus.load_chunks(include_types=include)
     docs = corpus.load_docs(include_types=include)
 
-    # doc_id — сквозной счётчик записей, совпадает у чанков и docs
+    # doc_id — сквозной счётчик записей, совпадает у чанков и docs.
+    # Порядок: sorted(glob) → дневники (0, 1), затем письма А (2) и Б (3);
+    # мусорная запись отфильтрована и счётчик не занимает.
     chunk_docs = {c.meta["doc"] for c in chunks}
     assert chunk_docs == {d["doc"] for d in docs} == {"0", "1", "2", "3"}
     # подпись отфильтрована из чанков письма, но есть в полном тексте
@@ -250,22 +343,45 @@ def test_load_chunks_docs_doc_ids_align(tmp_path, monkeypatch):
     assert all("Л. Толстой." not in c.text for c in chunks)
     # дневник не фильтруем: дата-хвост остаётся (склеена с предыдущим абзацем)
     assert any("31 окт. 1909." in c.text for c in chunks)
-    # мусор и проза исключены из обоих
+    # мусор и статьи исключены из обоих
     assert all(c.meta.get("type") in ("письмо", "дневник") for c in chunks)
     assert all(d["meta"].get("type") in ("письмо", "дневник") for d in docs)
 
 
 def test_load_docs_label_and_full_text(tmp_path, monkeypatch):
     monkeypatch.setattr(corpus, "DATA_DIR", str(tmp_path))
-    (tmp_path / "tei_letters.txt").write_text(
-        "### META | vol=59 | type=письмо | num=1 | to=Лобачевский | year=1844\n"
-        "тело письма А с достаточно длинным содержанием\n\nЛ. Толстой.\n\n",
-        encoding="utf-8")
+    _write_verbatis_files(tmp_path)
 
     docs = corpus.load_docs(include_types={"письмо"})
-    assert len(docs) == 1
+    assert len(docs) == 2
     d = docs[0]
     assert d["doc"] == "0"
     # полный текст БЕЗ фильтра подписей — для модалки /doc
     assert d["text"] == "тело письма А с достаточно длинным содержанием\n\nЛ. Толстой."
     assert d["label"] == corpus.source_label(d["meta"])
+
+
+def test_for_embedding_jsonl_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(corpus, "DATA_DIR", str(tmp_path))
+    _write_verbatis_files(tmp_path)
+
+    chunks = corpus.load_chunks()
+    assert all("МАРКЕР-FOR-EMBEDDING" not in c.text for c in chunks)
+    assert all("этот файл корпус не читает" not in c.text for c in chunks)
+    assert all(d["meta"].get("id") != "marker" for d in corpus.load_docs())
+
+
+def test_short_note_whole_record_one_chunk(tmp_path, monkeypatch):
+    monkeypatch.setattr(corpus, "DATA_DIR", str(tmp_path))
+    raw = tmp_path / "verbatis" / "data" / "raw" / "tolstoy"
+    raw.mkdir(parents=True)
+    (raw / "tolstoy_notes_dated.jsonl").write_text(json.dumps({
+        "id": "n1", "date": "1856-05-23", "title": "Заметка", "text": "очень коротко",
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    chunks = corpus.load_chunks()
+    assert len(chunks) == 1
+    # вырожденный случай: вся запись < MIN_CHARS — 1 чанк, который выпадет
+    # из индекса (фильтр MIN_CHARS в билдере), но останется в docs
+    assert len(chunks[0].text) < corpus.MIN_CHARS
+    assert corpus.load_docs()[0]["text"] == "очень коротко"

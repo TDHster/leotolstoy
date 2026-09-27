@@ -32,3 +32,15 @@ certs/
 visualization/.venv/
 visualization/out/
 visualization/src/__pycache__/
+
+# Verbatis (единственный источник корпуса): на сервер едут только 5 основных
+# .jsonl (corpus.py читает только их). .git/ уже исключён глобально.
+data/verbatis/data/raw/tolstoy/*.csv
+data/verbatis/data/raw/tolstoy/*.txt
+data/verbatis/data/raw/tolstoy/*_for_embedding.jsonl
+
+# tei_*.txt корпус больше не читает (Verbatis заменил TEI). ВНИМАНИЕ: rsync
+# --delete исключённые не удаляет — старые копии на сервере снести вручную
+# один раз. tom*.txt же удалятся сами: они уехали в data/90.../ (исключён) и
+# под эти исключения не подпадают.
+data/tei_*.txt

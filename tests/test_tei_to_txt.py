@@ -157,10 +157,6 @@ def test_format_record_escapes_pipe():
     rec = tei.format_record({"vol": "59", "type": "письмо", "to": "Б|В"}, ["абзац"])
     assert "to=Б/В" in rec
     assert "to=Б | В" not in rec
-    # и разбор обратно в corpus._parse_meta проходит
-    import corpus
-    meta = corpus._parse_meta(rec.splitlines()[0])
-    assert meta["to"] == "Б/В"
 
 
 DIARY_XML = """<?xml version='1.0' encoding='UTF-8'?>
@@ -220,19 +216,3 @@ def test_diary_plain_title_no_entry(tmp_path):
     path = _write(tmp_path, "v46_003_004_1847_03_17.xml", xml)
     meta, _ = tei.parse_diary(path)
     assert "entry" not in meta  # «Дневник» сам по себе не несёт информации
-
-
-def test_load_chunks_reads_tei_files(tmp_path, monkeypatch):
-    import corpus
-    monkeypatch.setattr(corpus, "DATA_DIR", str(tmp_path))
-
-    (tmp_path / "tom01.txt").write_text(
-        "### META | vol=1 | type=проза\n\nАбзац прозы.\n\n", encoding="utf-8")
-    (tmp_path / "tei_letters.txt").write_text(
-        "### META | vol=59 | type=письмо | to=Адресат\n\nАбзац письма.\n\n",
-        encoding="utf-8")
-
-    chunks = corpus.load_chunks()
-    types = {c.meta["type"] for c in chunks}
-    assert types == {"проза", "письмо"}
-    assert sum(1 for c in chunks if c.meta["type"] == "письмо") == 1

@@ -2,13 +2,16 @@
 """
 Сборка индекса эмбеддингов (`make embeddings` — локально или на сервере).
 
-1. читает все data/*.txt -> чанки (scripts/corpus.py)
+1. читает jsonl корпуса Verbatis (data/verbatis/…) -> чанки (scripts/corpus.py)
 2. эмбеддит их локальной ONNX-моделью (scripts/embed.py, MiniLM по умолчанию)
-3. сохраняет index/vectors.npy + index/chunks.json
+3. сохраняет index/vectors.npy + index/chunks.json + index/docs.json
 
 Индексы не ходят в git и rsync (.rsyncignore: index*/) — сборка делается
 там же, где индекс будет использоваться. На сервере эмбеддится только
 запрос пользователя — той же моделью, что и при сборке.
+
+Для тестовых прогонов: EMBED_INDEX_DIR (куда писать, дефолт index) и
+EMBED_LIMIT (сколько чанков максимум, дефолт — все).
 """
 from __future__ import annotations
 
@@ -28,7 +31,8 @@ from corpus import MIN_CHARS, load_chunks, load_docs, source_label  # noqa: E402
 from embed import embed_passages, EMBED_DIM, MODEL_NAME   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-INDEX_DIR = os.path.join(ROOT, "index")
+_idx = os.environ.get("EMBED_INDEX_DIR", "index")
+INDEX_DIR = _idx if os.path.isabs(_idx) else os.path.join(ROOT, _idx)
 
 
 def main() -> int:
@@ -39,13 +43,20 @@ def main() -> int:
         include = {t.strip() for t in env_types.split(",") if t.strip()}
         print(f"Ограничение по типу: {include}")
 
+    print(f"Индекс: {INDEX_DIR}")
+
     chunks = load_chunks(include_types=include)
-    before = len(chunks)
+    total = len(chunks)
     chunks = [c for c in chunks if len(c.text) >= MIN_CHARS]
-    print(f"Чанков: {len(chunks)} (отброшено коротких: {before - len(chunks)})")
+    print(f"Чанков: {len(chunks)} (отброшено коротких: {total - len(chunks)})")
     if not chunks:
-        print("Нечего эмбеддить. Сначала: make convert", file=sys.stderr)
+        print("Нечего эмбеддить. Сначала: make verbatis-fetch", file=sys.stderr)
         return 1
+
+    limit_s = os.environ.get("EMBED_LIMIT", "").strip()
+    if limit_s.isdigit() and int(limit_s) > 0:
+        chunks = chunks[:int(limit_s)]
+        print(f"EMBED_LIMIT={limit_s}: эмбеддим первые {len(chunks)} чанков")
 
     texts = [c.text for c in chunks]
 
@@ -121,9 +132,9 @@ def main() -> int:
     json_mb = os.path.getsize(os.path.join(INDEX_DIR, "chunks.json")) / 1e6
     docs_mb = os.path.getsize(os.path.join(INDEX_DIR, "docs.json")) / 1e6
     print(f"\nСохранено:")
-    print(f"  index/vectors.npy   {vec_mb:.1f} МБ")
-    print(f"  index/chunks.json   {json_mb:.1f} МБ")
-    print(f"  index/docs.json     {docs_mb:.1f} МБ ({len(docs)} записей)")
+    print(f"  {INDEX_DIR}/vectors.npy   {vec_mb:.1f} МБ")
+    print(f"  {INDEX_DIR}/chunks.json   {json_mb:.1f} МБ")
+    print(f"  {INDEX_DIR}/docs.json     {docs_mb:.1f} МБ ({len(docs)} записей)")
     print(f"\nСервер: индексы rsync'ом не синкаются (.rsyncignore: index*/) —")
     print("соберите индекс на сервере: make embeddings")
     return 0

@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """
-Чтение txt файлов (результат epub_to_txt.py) и нарезка на чанки.
+Чтение корпуса Verbatis (data/verbatis/data/raw/tolstoy/*.jsonl) и нарезка на чанки.
 
-Формат входа:
-    ### META | vol=5 | title=Война и мир | type=проза
-    <абзацы через пустую строку>
+Единственный источник текстов — репозиторий Verbatis (ПСС-90, «специально
+обработанные для нас» тексты): 5 корпусов в jsonl. Читаем только основные
+*.jsonl (без *_for_embedding.jsonl). Вся метадата записи сохраняется в чанк
+как есть + составные ключи для UI (type, vol, to, num, year, entry).
 
-Метаданные (vol, title, type) копируются в каждый чанк.
+Legacy: scripts/epub_to_txt.py и scripts/tei_to_txt.py больше не участвуют
+в пайплайне (остаются в репо как справочные).
 """
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+
+
+def _verbatis_dir() -> str:
+    """Каталог jsonl-корпусов. Вычисляется на каждый вызов: тесты
+    подменяют DATA_DIR через monkeypatch, и путь должен следовать за ним."""
+    return os.path.join(DATA_DIR, "verbatis", "data", "raw", "tolstoy")
 
 # Целевой размер чанка в символах. MiniLM-L12-v2 эмбеддит только первые ~128 токенов
 # любого текста (~3.3 симв/токен на кириллице, измерено токенизатором fastembed —
@@ -29,6 +39,15 @@ SIG_MAX_CHARS = 80  # подписи/даты длиннее не трогаем
 # нагрузки для RAG — такие записи пропускаем при сборке индекса.
 JUNK_TITLE_RE = re.compile(r"^(УКАЗАТЕЛЬ|СОДЕРЖАНИЕ|ОГЛАВЛЕНИЕ)\b", re.IGNORECASE)
 
+# Маппинг файлов корпуса Verbatis → тип документа в нашем индексе.
+TYPE_BY_STEM = {
+    "tolstoy_letters":     "письмо",
+    "tolstoy_diaries":     "дневник",
+    "tolstoy_notes_dated": "записная книжка",
+    "tolstoy_articles":    "статья",
+    "tolstoy_treatises":   "трактат",
+}
+
 
 def _is_junk_record(meta: dict) -> bool:
     """True, если запись — справочный мусор (указатель/оглавление), а не текст."""
@@ -39,159 +58,82 @@ def _is_junk_record(meta: dict) -> bool:
 @dataclass
 class Chunk:
     text: str                       # текст для эмбеддинга и показа
-    meta: dict = field(default_factory=dict)  # vol, title, type
+    meta: dict = field(default_factory=dict)  # метадата записи Verbatis + doc/chunk
 
 
-def _parse_meta(line: str) -> dict:
-    """Парсит строку ### META | vol=5 | title=... | type=..."""
-    line = line[len("### META"):].strip()
-    if line.startswith("|"):
-        line = line[1:]
-    meta = {}
-    for part in line.split("|"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        meta[k.strip()] = v.strip()
+def _year_of(rec: dict) -> str | None:
+    """Год из date_start/date_end (fallback date); диапазон разных годов → «1900–1910»."""
+    m1 = re.match(r"^\d{4}", str(rec.get("date_start") or ""))
+    m2 = re.match(r"^\d{4}", str(rec.get("date_end") or ""))
+    if m1 and m2 and m1.group(0) != m2.group(0):
+        return f"{m1.group(0)}–{m2.group(0)}"
+    for key in ("date_start", "date_end", "date"):
+        m = re.match(r"^\d{4}", str(rec.get(key) or ""))
+        if m:
+            return m.group(0)
+    return None
+
+
+def _verbatis_meta(rec: dict, rec_type: str) -> dict:
+    """Метаданные записи: ВСЕ поля Verbatis как есть + составные ключи для UI
+    (type, vol, to, num, year, entry). «Максимум метаданных» — ничего не теряем.
+    Поле text исключается: текст живёт в абзацах, дублировать его в каждый чанк
+    нельзя (раздул бы chunks.json на десятки МБ)."""
+    meta = dict(rec)  # id, date, date_start, date_end, age, title, volume, pages,
+                      # file, in_ss22, sent + у писем addressee/place/number
+    meta.pop("text", None)
+    meta["type"] = rec_type
+    if rec.get("volume") is not None:
+        meta["vol"] = str(rec["volume"])
+    if rec.get("addressee") is not None:
+        meta["to"] = str(rec["addressee"])
+    if rec.get("number") is not None:
+        meta["num"] = str(rec["number"])
+    year = _year_of(rec)
+    if year:
+        meta["year"] = year
+    title = str(rec.get("title") or "").strip()
+    if rec_type == "письмо":
+        # entry как раньше собирал tei_to_txt: «N. Адресат, год, место, с. страницы»
+        if rec.get("number") is not None and rec.get("addressee"):
+            parts = [str(rec["addressee"])]
+            if year:
+                parts.append(year)
+            if rec.get("place"):
+                parts.append(str(rec["place"]))
+            if rec.get("pages") is not None:
+                parts.append(f"с. {rec['pages']}")
+            entry = f"{rec['number']}. {', '.join(parts)}"
+        else:
+            entry = title or None
+    elif rec_type == "дневник":
+        entry = title if title and title.rstrip(".,;: ") != "Дневник" else None
+    else:  # записная книжка / статья / трактат
+        entry = title or None
+    if entry:
+        meta["entry"] = entry
     return meta
 
 
-def _normalize_old_russian(text: str) -> str:
-    """Преобразует дореформенные буквы в современные."""
-    # Старорусские буквы → современные
-    replacements = {
-        'ѣ': 'е',  # ять
-        'Ѣ': 'Е',
-        'і': 'и',  # i десятеричное
-        'І': 'И',
-        'ѳ': 'ф',  # фита
-        'Ѳ': 'Ф',
-        'ѵ': 'и',  # ижица
-        'Ѵ': 'И',
-        'ѐ': 'е',  # ё с грависом
-        'Ѐ': 'Е',
-        'ъ': '',   # твёрдый знак в конце слов (граница слова)
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    # Убираем конечный ъ (граница слова): слово + ъ + пробел/конец → слово + пробел/конец
-    text = re.sub(r'ъ\b', '', text)
-    return text
-
-
-def _strip_editorial_notes(text: str) -> str:
-    """
-    Удаляет редакторские комментарии из начала и конца текста.
-
-    В томах полного собрания сочинений могут быть:
-    - Издательская информация ("Электронное издание", "Настоящее издание")
-    - Редакторские введения (историко-литературная справка)
-    - Текстологические примечания ("К окончательному тексту...")
-    - Варианты редакций ("Вместо: ... — в ж. ред.: ...")
-    - Ссылки на страницы ("Стр. 5, строка 10")
-    - Библиографические ссылки
-
-    Возвращает только основной текст до первого маркера комментариев.
-    """
-    lines = text.split('\n')
-    end_boundary = len(lines)  # конец основного текста
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-
-        # Издательские и редакторские маркеры — сразу обрезаем
-        if any(marker in line for marker in [
-            'Электронное издание',
-            'Российской государственной библиотекой',
-            'Настоящее издание представляет',
-            'доступно на портале',
-            'Государственное издательство',
-            'Подготовлено на основе',
-            '90-томного собрания',
-            'Если Вы нашли ошибку',
-            'Непосредственно вслед за напечатанием',
-            'В начале варианта обозначается страница',
-            'исправленное по новым корректурам',
-            'Первый слой рукописи',
-            'РЕДАКТОР',
-            'Рукописей «Войны и мира» сохранилось',
-            'В том 14 входят',
-            'Из писем к Бартеневу',
-            'Наборная рукопись отправлялась',
-            'Перепечатка разрешается безвозмездно',
-            'Reproduction libre',
-            'печатать роман по авторским корректурам',
-            'Существующие печатные тексты',
-            'черновым автографам',
-            'При отборе вариантов редакторы',
-            'Располагая варианты по рукописям',
-            'Работа над статьей',
-            'Запись в Дневнике',
-            'черновым его рукописям',
-            'В настоящем издании',
-            'впервые была напечатана',
-            'Рукописи сказки не сохранились',
-            'продиктовал в фонограф'
-        ]):
-            end_boundary = i
-            break
-
-        # Маркер "конец." — самый надежный для художественных произведений
-        if stripped == 'конец.':
-            end_boundary = i
-            break
-
-        # Начало текстологических комментариев (длинный абзац со специфическими фразами)
-        if len(line) > 300 and any(marker in line for marker in [
-            'К окончательному тексту',
-            'варианты текста',
-            'в основу которого',
-            'Рукопись, автограф',
-            'исправленный Толстым'
-        ]):
-            end_boundary = i
-            break
-
-        # Ссылки на страницы и строки (ТОЛЬКО в начале строки, не в скобках внутри текста)
-        # Паттерн: "Стр. 5, строк" или "*Стр. 10" (с отступом или звёздочкой)
-        if re.match(r'^\s*\*?\s*Стр\.\s+\d+,?\s+строк', line):
-            end_boundary = i
-            break
-
-        # Варианты редакций
-        if re.search(r'Вместо:.*—\s*в\s+ж\.\s*ред\.:', line):
-            end_boundary = i
-            break
-
-        # Ссылки на части и главы (формат: "Ч. V, гл. I.")
-        if re.match(r'^Ч\.\s+[IVXLCDM]+,\s+гл\.\s+[IVXLCDM]+\.$', stripped):
-            end_boundary = i
-            break
-
-        # Датировка + топоним (авторская подпись): "24 сентября." → пустая строка → "Ясная Поляна."
-        if re.match(r'^\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\.$', stripped):
-            # Проверяем следующие 2-3 строки на наличие топонима
-            next_lines = lines[i+1:i+4] if i+4 < len(lines) else lines[i+1:]
-            if any(re.match(r'^(Ясная Поляна|Москва|Петербург|Женева|Лондон)\.?$', nl.strip()) for nl in next_lines):
-                end_boundary = i
-                break
-
-        # Библиографические ссылки с упоминанием изданий
-        if re.search(r'«(Русский вестник|Современник|Красная новь)».*\d{4}', line):
-            end_boundary = i
-            break
-
-        # Начало библиографических ссылок (одинокая цифра, потом Ibid/Письмо/Цитируется)
-        if i > 0 and re.match(r'^\d+$', stripped):
-            # Проверяем следующие 2 строки
-            next_lines = lines[i+1:i+3] if i+3 < len(lines) else lines[i+1:]
-            if any(re.search(r'Ibid\.|Письмо не издано|Цитируется по', nl) for nl in next_lines):
-                end_boundary = i
-                break
-
-    # Возвращаем только основной текст
-    return '\n'.join(lines[:end_boundary])
+def _iter_jsonl_records(path: str, rec_type: str):
+    """(meta, [абзацы]) по строкам jsonl. Битые строки и пустые тексты пропускаются."""
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"[corpus] битая строка jsonl {path}:{lineno} — пропущена",
+                      file=sys.stderr)
+                continue
+            text = str(rec.get("text") or "").strip()
+            if not text:
+                continue
+            paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+            if paras:
+                yield _verbatis_meta(rec, rec_type), paras
 
 
 # --- фильтр подписей/дат в конце писем --------------------------------------
@@ -284,28 +226,6 @@ def _filter_letter_signature(meta: dict, paras: list[str]) -> list[str]:
     return out
 
 
-def _iter_records(path: str):
-    """Отдаёт (meta, [абзацы]) для каждой записи в файле."""
-    with open(path, encoding="utf-8") as f:
-        content = f.read()
-    # Нормализация дореформенной орфографии
-    content = _normalize_old_russian(content)
-
-    # делим по строкам-заголовкам META
-    parts = re.split(r"(?m)^### META.*$", content)
-    headers = re.findall(r"(?m)^### META.*$", content)
-
-    # parts[0] — то, что до первого META (обычно пусто)
-    for header, body in zip(headers, parts[1:]):
-        # Удаляем редакторские комментарии из каждой записи
-        body = _strip_editorial_notes(body)
-
-        meta = _parse_meta(header)
-        paras = [p.strip() for p in body.split("\n\n") if p.strip()]
-        if paras:
-            yield meta, paras
-
-
 def _chunk_paragraphs(paras: list[str]) -> list[str]:
     """1 абзац = 1 чанк. Абзацы короче MIN_CHARS приклеиваются к следующему
     (хвост из коротких — к предыдущему), чтобы ничего не выпало при эмбеддинге.
@@ -355,18 +275,25 @@ def _split_long(para: str) -> list[str]:
 
 
 def _iter_indexed_records(include_types: set[str] | None = None):
-    """Единый порядок перечисления записей: файлы sorted(glob), записи по порядку,
-    одинаковые фильтры include_types/junk. doc_id — сквозной счётчик записей.
-    Его используют И load_chunks, И load_docs — нумерация совпадает по построению."""
+    """Единый порядок перечисления записей Verbatis: файлы sorted(glob), записи
+    по порядку строк, одинаковые фильтры include_types/junk. doc_id — сквозной
+    счётчик записей. Его используют И load_chunks, И load_docs — нумерация
+    совпадает по построению."""
     doc_id = 0
-    # tom*.txt — художественные произведения (EPUB, legacy); tei_*.txt — письма
-    # и дневники из TEI-корпуса tolstoydigital (см. scripts/tei_to_txt.py).
-    files = sorted(
-        glob.glob(os.path.join(DATA_DIR, "tom*.txt"))
-        + glob.glob(os.path.join(DATA_DIR, "tei_*.txt"))
+    paths = sorted(
+        p for p in glob.glob(os.path.join(_verbatis_dir(), "*.jsonl"))
+        if not os.path.basename(p).endswith("_for_embedding.jsonl")
     )
-    for path in files:
-        for meta, paras in _iter_records(path):
+    if not paths:
+        print("[corpus] Verbatis не найден — сначала: make verbatis-fetch",
+              file=sys.stderr)
+    for path in paths:
+        stem = os.path.basename(path)[: -len(".jsonl")]
+        rec_type = TYPE_BY_STEM.get(stem)
+        if rec_type is None:
+            print(f"[corpus] пропущен неизвестный файл: {path}", file=sys.stderr)
+            continue
+        for meta, paras in _iter_jsonl_records(path, rec_type):
             if include_types and meta.get("type") not in include_types:
                 continue
             if _is_junk_record(meta):
@@ -377,7 +304,7 @@ def _iter_indexed_records(include_types: set[str] | None = None):
 
 def load_chunks(include_types: set[str] | None = None) -> list[Chunk]:
     """
-    Читает все tom*.txt и tei_*.txt в data/, режет на чанки (1 абзац = 1 чанк).
+    Читает jsonl корпуса Verbatis (data/verbatis/…), режет на чанки (1 абзац = 1 чанк).
     include_types — например {"письмо"} чтобы взять только письма. None = всё.
     """
     chunks: list[Chunk] = []
@@ -412,7 +339,7 @@ def source_label(meta: dict) -> str:
     t = meta.get("type", "")
     vol = meta.get("vol", "")
     year = meta.get("year", "")
-    entry = meta.get("entry", "")  # полное название из TOC
+    entry = meta.get("entry", "")  # полное название из TOC / составной заголовок
 
     if t == "письмо":
         # Если есть полное название из TOC, используем его
@@ -433,13 +360,15 @@ def source_label(meta: dict) -> str:
         if entry and entry != year:  # если есть название раздела, не только год
             return f"Дневник: {entry}, {year}".strip().rstrip(",")
         return f"Дневник, {year}".strip().rstrip(",")
-    elif t == "проза":
-        title = meta.get("title", "")
-        if title and "том" not in title.lower():
-            return f"{title}, том {vol}"
-        return f"Том {vol} (художественные произведения)"
+    elif t in ("статья", "трактат", "записная книжка"):
+        base = {"статья": "Статья", "трактат": "Трактат",
+                "записная книжка": "Записная книжка"}[t]
+        title = meta.get("title") or entry
+        parts = [p for p in (title, year) if p]
+        return f"{base}: {', '.join(parts)}" if parts else base
     else:
-        return f"Том {vol}"
+        title = meta.get("title") or ""
+        return title or (f"Том {vol}" if vol else "")
 
 
 if __name__ == "__main__":
@@ -450,7 +379,8 @@ if __name__ == "__main__":
     print("По типу:", dict(by_type))
     lens = [len(c.text) for c in cs]
     print(f"Длина чанка: min={min(lens)} avg={sum(lens)//len(lens)} max={max(lens)}")
-    print(f"Документов (для /doc): {len(load_docs())}")
+    docs = load_docs()
+    print(f"Документов (для /doc): {len(docs)}")
     print(f"Чанков без meta['doc']: {sum(1 for c in cs if 'doc' not in c.meta)}")
     print("\nПример:")
     print(source_label(cs[0].meta))

@@ -1,15 +1,16 @@
 # Беседа с Л. Н. Толстым
 
-Чат, отвечающий в стиле Льва Толстого. RAG поверх его писем и дневников
-из всех томов собрания сочинений, генерация — через внешнюю LLM (любой
-OpenAI-совместимый API).
+Чат, отвечающий в стиле Льва Толстого. RAG поверх его писем, дневников,
+записных книжек, статей и трактатов из 90-томного собрания сочинений
+(тексты — из приватного репозитория Verbatis), генерация — через внешнюю LLM
+(любой OpenAI-совместимый API).
 
 ## Как это устроено
 
 ```
 Локальная машина (разово)             Сервер (~4 ГБ RAM)
-├─ make convert    EPUB → data/*.txt   └─ Caddy (reverse proxy, :443)
-├─ make embeddings data/*.txt → index/     └─ TLS терминация (Let's Encrypt)
+├─ make verbatis-fetch  корпус Verbatis  └─ Caddy (reverse proxy, :443)
+├─ make embeddings  jsonl → index/       └─ TLS терминация (Let's Encrypt)
 └─ ./deploy.sh  rsync кода (индексы собир. на сервере) └─ Docker (FastAPI, :8000 HTTP)
                                                    ├─ Basic Auth (1 пользователь)
                                                    ├─ эмбеддинг запроса (MiniLM/ONNX)
@@ -18,8 +19,8 @@ OpenAI-совместимый API).
 ```
 
 - **Эмбеддинги — локально** (ONNX, без torch), одна модель при сборке и на сервере.
-  Векторы документов считаются один раз локально; на сервере эмбеддится только запрос.
-- **Поиск — numpy** (корпус ~19.6 тыс. фрагментов, brute-force косинус — доли мс).
+  Векторы документов считаются один раз; на сервере эмбеддится только запрос.
+- **Поиск — numpy** (корпус ~84 тыс. фрагментов, brute-force косинус — доли мс).
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт и модель в `.env`).
 - **Продакшн**: https://verbatis.ru (Caddy + Let's Encrypt автоматически).
 
@@ -29,9 +30,9 @@ OpenAI-совместимый API).
 
 ```bash
 make install       # uv sync — окружение + зависимости (из uv.lock)
-make convert       # EPUB → data/*.txt (все тома)
-make embeddings    # data/*.txt → index/vectors.npy + index/chunks.json
-cp .env.example .env   # впишите APP_PASS и OPENROUTER_API_KEY
+make verbatis-fetch  # клонировать корпус Verbatis в data/verbatis
+make embeddings    # data/verbatis/*.jsonl → index/vectors.npy + index/chunks.json
+cp .env.example .env   # впишите APP_PASS и LLM_API_KEY
 make run           # http://localhost:8000  (логин из .env)
 ```
 
@@ -40,13 +41,25 @@ make run           # http://localhost:8000  (логин из .env)
 
 ## Данные
 
-`scripts/epub_to_txt.py` берёт все тома из `data/`:
-- 18–20 — письма (1842–1910), 21–22 — дневники (1847–1910);
-- отделяет текст Толстого от редакторских сносок/комментариев;
-- проставляет метаданные (адресат, год, тип) — они видны в «Источниках» ответа
-  и позволяют фильтровать (`SRC_TYPES` в `.env`).
+Корпус — репозиторий [Verbatis](https://github.com/Nikulov-IB/Verbatis) (приватный):
+сырые тексты ПСС-90, специально обработанные. `make verbatis-fetch` клонирует его
+в `data/verbatis`; `scripts/corpus.py` читает 5 jsonl-корпусов
+(`data/verbatis/data/raw/tolstoy/`):
 
-Орфография в этом издании (1978) современная — нормализация не требуется.
+| Файл | Записей | Тип |
+|---|---:|---|
+| `tolstoy_letters.jsonl` | 9087 | письмо |
+| `tolstoy_diaries.jsonl` | 4584 | дневник |
+| `tolstoy_notes_dated.jsonl` | 576 | записная книжка |
+| `tolstoy_articles.jsonl` | 278 | статья |
+| `tolstoy_treatises.jsonl` | 26 | трактат |
+
+Вся метадата записи (адресат, дата, место, том, страницы, возраст Толстого,
+`in_ss22` и т.д.) сохраняется в индекс — она видна в «Источниках» ответа
+и позволяет фильтровать (`SRC_TYPES` в `.env`).
+
+Legacy: `scripts/epub_to_txt.py` (EPUB → tom*.txt, проза) и `scripts/tei_to_txt.py`
+(TEI/XML → tei_*.txt) остаются в репо как справочные — в пайплайн не входят.
 
 ## Деплой на сервер (Docker + Caddy + Let's Encrypt)
 
@@ -54,8 +67,8 @@ make run           # http://localhost:8000  (логин из .env)
 - **Сервер** — Caddy (HTTPS, порт 443) → Docker (HTTP, localhost:8000).
 
 На сервере нужен Docker + docker compose + Caddy. Индексы собираются там же,
-где используются (локальный — `make embeddings`, Qwen — `make embeddings-qwen`),
-в образ не пекутся и rsync'ом не синкаются (`.rsyncignore`: `index*/`).
+где используются (`make embeddings`), в образ не пекутся и rsync'ом не
+синкаются (`.rsyncignore`: `index*/`).
 
 ### Полная инструкция
 
@@ -121,13 +134,14 @@ docker compose up -d --build   # пересобрать после измене�
 
 Прочее:
 - **Системный промпт** (характер речи Толстого) — `SYSTEM_PROMPT` в `server/app.py`.
-- **Только письма или только дневники** — `SRC_TYPES=письмо` / `дневник` в `.env`.
+- **Только письма / дневники / статьи…** — `SRC_TYPES=письмо` / `письмо,дневник`
+  и т.п. в `.env` (типы: письмо, дневник, записная книжка, статья, трактат).
 - **Сколько фрагментов в контексте** — `TOP_K` в `.env`.
 
 ## Тесты
 
 ```bash
-uv run pytest        # 24 теста, ~0.3с, без сети и без загрузки модели
+uv run pytest        # 108 тестов, ~0.4с, без сети и без загрузки модели
 ```
 
 Покрытие: парсинг/чанкинг корпуса, косинусный поиск (на синтетическом индексе),
