@@ -20,6 +20,7 @@ import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
@@ -28,6 +29,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -72,6 +74,9 @@ AUTH_FAIL_DELAY = float(os.environ.get("AUTH_FAIL_DELAY", "0.5"))
 # Логировать текст запросов/ответов. По умолчанию ВЫКЛ — это персональные данные
 # пользователей (их вопросы). Включайте осознанно на своём сервере: LOG_QUERIES=1.
 LOG_QUERIES = os.environ.get("LOG_QUERIES", "").strip().lower() in ("1", "true", "yes")
+# MCP-сервер для Cursor (streamable HTTP на /mcp). Пусто = /mcp не монтируется
+# (маршрута нет вообще). Токен проверяется ASGI-мидлварью, не Basic Auth.
+MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -175,9 +180,289 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# --- общий код поиска (/chat и MCP-инструменты) ------------------------------
+async def _embed_query(message: str, model_id: str):
+    """(Retriever, qvec) — эмбеддинг запроса моделью индекса.
+
+    Вся обработка ошибок (индекс, эмбеддер, рассинхрон размерностей, ошибки
+    API-эмбеддера) — здесь: /chat и MCP получают одинаковую семантику.
+    """
+    # Получить retriever для выбранной модели
+    try:
+        retriever = _get_retriever(model_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Не удалось загрузить индекс для модели '%s': %s", model_id, e)
+        raise HTTPException(500, f"Ошибка загрузки индекса: {e}") from e
+
+    # Получить эмбеддер для этого индекса (API-модели требуют ключ в .env)
+    try:
+        embedder = retriever.get_embedder()
+    except RuntimeError as e:
+        log.error("Не удалось создать эмбеддер для модели '%s': %s", model_id, e)
+        raise HTTPException(503, str(e)) from e
+
+    # эмбеддинг CPU-bound → в threadpool, чтобы не блокировать event loop
+    try:
+        qvec = await run_in_threadpool(embedder.embed_query, message)
+        # защита от рассинхрона размерностей (напр. провайдер сменил модель)
+        vectors = getattr(retriever, "vectors", None)
+        if vectors is not None and (qvec.ndim != 1 or qvec.shape[0] != vectors.shape[1]):
+            raise HTTPException(
+                503,
+                f"Модель '{model_id}' вернула вектор размерности {qvec.shape}, "
+                f"а индекс требует {vectors.shape[1]}. Выберите другую модель.",
+            )
+    except RuntimeError as e:
+        error_msg = str(e)
+        # Распознаём типичные ошибки API и даём понятное объяснение
+        if "403" in error_msg or "Access denied" in error_msg:
+            log.error("Embedding API заблокирован (403): %s", error_msg)
+            raise HTTPException(
+                503,
+                f"Модель '{model_id}' временно недоступна: API-провайдер заблокировал запросы с этого сервера. "
+                f"Попробуйте локальную модель или свяжитесь с администратором."
+            ) from e
+        elif "429" in error_msg or "rate limit" in error_msg.lower():
+            log.error("Embedding API rate limit: %s", error_msg)
+            raise HTTPException(429, f"Превышен лимит запросов для модели '{model_id}'. Попробуйте позже.") from e
+        else:
+            log.error("Ошибка эмбеддинга для модели '%s': %s", model_id, error_msg)
+            raise HTTPException(503, f"Не удалось обработать запрос с моделью '{model_id}': {error_msg[:200]}") from e
+    return retriever, qvec
+
+
+async def _retrieve(message: str, model_id: str, top_k: int = TOP_K) -> list[dict]:
+    """Эмбеддинг запроса + поиск фрагментов (как в /chat)."""
+    retriever, qvec = await _embed_query(message, model_id)
+    return retriever.search(qvec, top_k=top_k, types=SRC_TYPES_SET)
+
+
+# --- MCP-сервер для Cursor (streamable HTTP на /mcp) -------------------------
+# Инструменты для агента: только фактура (поиск, метаданные, полные тексты).
+# Внешняя LLM из MCP НЕ вызывается — генерацию агент делает сам (у Cursor своя
+# модель). Защита: Bearer-токен MCP_API_KEY проверяется ASGI-мидлварью
+# (_MCPTokenAuth) — FastAPI-зависимости (Depends) на mount не работают.
+_KNOWN_TYPES = {"письмо", "дневник", "записная книжка", "статья", "трактат"}
+
+
+def _check_types(types: list[str] | None) -> set[str] | None:
+    if not types:
+        return None
+    bad = set(types) - _KNOWN_TYPES
+    if bad:
+        raise ValueError(
+            f"Неизвестные типы источников: {sorted(bad)}. Известные: {sorted(_KNOWN_TYPES)}"
+        )
+    return set(types)
+
+
+def _type_filter(types: list[str] | None) -> set[str] | None:
+    """Фильтр типов инструмента, ограниченный глобальным SRC_TYPES (если задан)."""
+    types_set = _check_types(types)
+    if not SRC_TYPES_SET:
+        return types_set
+    return (types_set or set(_KNOWN_TYPES)) & SRC_TYPES_SET
+
+
+class _MCPTokenAuth:
+    """Проверка Bearer MCP_API_KEY вокруг FastMCP-приложения (mount-обёртка)."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan-события проходят мимо
+            await self.app(scope, receive, send)
+            return
+        provided = ""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                provided = value.decode("latin-1")
+                break
+        if not (self.token and secrets.compare_digest(provided, "Bearer " + self.token)):
+            if AUTH_FAIL_DELAY > 0:
+                await asyncio.sleep(AUTH_FAIL_DELAY)
+            body = json.dumps(
+                {"error": "unauthorized", "detail": "Требуется корректный MCP_API_KEY"},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"www-authenticate", b'Bearer realm="mcp"'),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
+mcp = FastMCP("tolstoy")
+
+
+@mcp.tool()
+async def tolstoy_search(
+    query: Annotated[str, Field(description="Запрос по-русски, напр. «что Толстой писал о смерти»")],
+    top_k: Annotated[int, Field(default=5, ge=1, le=20, description="Сколько фрагментов вернуть (1-20)")] = 5,
+    types: Annotated[list[str] | None, Field(default=None, description="Типы источников: письмо / дневник / записная книжка / статья / трактат; None = все")] = None,
+    addressee: Annotated[str | None, Field(default=None, description="Адресат писем (подстрока, напр. «Чертков»); работает только для писем")] = None,
+    year_from: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год от (включительно)")] = None,
+    year_to: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год до (включительно)")] = None,
+    volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
+) -> dict:
+    """Семантический поиск по корпусу Толстого БЕЗ вызова LLM.
+
+    Возвращает фрагменты, ближайшие по смыслу: текст, ссылку на источник,
+    скор и полные метаданные (тип, дата, возраст, том, адресат, № письма…).
+    Дёшев и быстр — основной инструмент для фактов и цитат. Полный текст
+    записи — tolstoy_doc(doc из meta результата)."""
+    types_set = _type_filter(types)
+    if types and not types_set:
+        return {"query": query, "count": 0, "results": [],
+                "note": "Фильтр типов не пересекается с ограничением сервера (SRC_TYPES)"}
+    try:
+        retriever, qvec = await _embed_query(query.strip(), "local")
+        results = retriever.search(
+            qvec, top_k=top_k,
+            types=types_set,
+            addressee=addressee,
+            year_from=year_from, year_to=year_to,
+            volume=str(volume) if volume is not None else None,
+        )
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+    return {
+        "query": query,
+        "count": len(results),
+        "results": [{
+            "text": r["text"],
+            "source": r["source"],
+            "score": round(r["score"], 3),
+            "meta": r["meta"],
+        } for r in results],
+    }
+
+
+@mcp.tool()
+async def tolstoy_browse(
+    types: Annotated[list[str] | None, Field(default=None, description="Типы источников: письмо / дневник / записная книжка / статья / трактат; None = все")] = None,
+    addressee: Annotated[str | None, Field(default=None, description="Адресат писем (подстрока, напр. «Чертков»); работает только для писем")] = None,
+    year_from: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год от (включительно)")] = None,
+    year_to: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год до (включительно)")] = None,
+    volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
+    limit: Annotated[int, Field(default=20, ge=1, le=100, description="Записей на страницу (1-100)")] = 20,
+    offset: Annotated[int, Field(default=0, ge=0, description="Смещение (пагинация)")] = 0,
+) -> dict:
+    """Список ЗАПИСЕЙ корпуса по метаданным, БЕЗ вызова LLM.
+
+    Навигация по переписке: «все письма Черткову за 1890-е», «дневники 1881 г.»
+    и т.п. Записи отсортированы по дате, с превью текста и пагинацией. Полный
+    текст записи — tolstoy_doc(doc)."""
+    types_set = _type_filter(types)
+    if types and not types_set:
+        return {"total": 0, "offset": offset, "limit": limit, "records": [],
+                "note": "Фильтр типов не пересекается с ограничением сервера (SRC_TYPES)"}
+    try:
+        retriever = _get_retriever("local")
+        total, records = await run_in_threadpool(
+            retriever.browse,
+            types_set, addressee, year_from, year_to,
+            str(volume) if volume is not None else None,
+            limit, offset,
+        )
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+    return {"total": total, "offset": offset, "limit": limit, "records": records}
+
+
+@mcp.tool()
+async def tolstoy_facets() -> dict:
+    """Словарь значений для фильтров БЕЗ вызова LLM.
+
+    Типы со счётчиками записей, диапазон лет, топ-100 адресатов писем, тома
+    ПСС-90 со счётчиками. Вызывай, чтобы узнать валидные значения фильтров
+    (addressee / year / volume / types) перед tolstoy_search/browse/grep."""
+    try:
+        retriever = _get_retriever("local")
+        return await run_in_threadpool(retriever.facets)
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+
+
+@mcp.tool()
+async def tolstoy_doc(
+    doc_id: Annotated[int, Field(description="id полного текста записи — поле meta.doc из результатов tolstoy_search / tolstoy_browse")],
+) -> dict:
+    """Полный текст записи корпуса и её метаданные по doc_id, БЕЗ вызова LLM.
+
+    Возвращает {doc, label, text, meta} — text содержит все абзацы записи."""
+    try:
+        docs = await run_in_threadpool(_load_docs)  # json.load ~50 МБ — не блокируем event loop
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+    if doc_id < 0 or doc_id >= len(docs):
+        raise ValueError(f"Документ {doc_id} не найден (всего записей: {len(docs)})")
+    return docs[doc_id]
+
+
+@mcp.tool()
+async def tolstoy_grep(
+    pattern: Annotated[str, Field(min_length=1, max_length=200, description="Слово или фраза для точного поиска")],
+    whole_word: Annotated[bool, Field(default=False, description="True — целое слово (границы слова), False — подстрока")] = False,
+    types: Annotated[list[str] | None, Field(default=None, description="Типы источников: письмо / дневник / записная книжка / статья / трактат; None = все")] = None,
+    addressee: Annotated[str | None, Field(default=None, description="Адресат писем (подстрока, напр. «Чертков»); работает только для писем")] = None,
+    year_from: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год от (включительно)")] = None,
+    year_to: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год до (включительно)")] = None,
+    volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
+    limit: Annotated[int, Field(default=20, ge=1, le=50, description="Сколько чанков с контекстом вернуть (1-50)")] = 20,
+) -> dict:
+    """Точный поиск слова/фразы по текстам чанков, БЕЗ вызова LLM.
+
+    Регистронезависимый. Возвращает суммарное число вхождений по корпусу
+    (с учётом фильтров), число задетых чанков и до limit фрагментов с контекстом
+    ±150 символов вокруг первого вхождения. Фильтры дают частотность:
+    «сколько раз „смерть“ встречается в письмах Черткову за 1890-е».
+    Орфография корпуса нормализована (ё/ъ) — если слово не нашлось,
+    попробуй tolstoy_search."""
+    types_set = _type_filter(types)
+    if types and not types_set:
+        return {"count": 0, "chunks_matched": 0, "results": [],
+                "note": "Фильтр типов не пересекается с ограничением сервера (SRC_TYPES)"}
+    try:
+        retriever = _get_retriever("local")
+        return await run_in_threadpool(
+            retriever.grep,
+            pattern, whole_word, types_set, addressee, year_from, year_to,
+            str(volume) if volume is not None else None,
+            limit,
+        )
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+
+
+# Starlette-приложение MCP со СВОИМ lifespan (session manager streamable HTTP).
+# path="/" + mount на /mcp → эндпоинт ровно на /mcp.
+_mcp_app = mcp.http_app(path="/", transport="streamable-http")
+
+
 # --- приложение --------------------------------------------------------------
+@asynccontextmanager
+async def _combined_lifespan(app_: FastAPI):
+    # Starlette НЕ форвардит lifespan в mount-подприложения — оба контекста
+    # (индекс/прогрев + session manager FastMCP) запускаем явно.
+    async with lifespan(app_):
+        async with _mcp_app.lifespan(app_):
+            yield
+
+
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Толстой-чат", lifespan=lifespan)
+app = FastAPI(title="Толстой-чат", lifespan=_combined_lifespan)
 app.state.limiter = limiter
 security = HTTPBasic()
 
@@ -320,54 +605,11 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
         client_ip = request.client.host if request.client else "?"
         log.info("запрос от %s (%s), модель '%s': %r", _user, client_ip, body.model, msg)
 
-    # Получить retriever для выбранной модели
-    try:
-        retriever = _get_retriever(body.model)
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("Не удалось загрузить индекс для модели '%s': %s", body.model, e)
-        raise HTTPException(500, f"Ошибка загрузки индекса: {e}") from e
-
-    # Получить эмбеддер для этого индекса (API-модели требуют ключ в .env)
-    try:
-        embedder = retriever.get_embedder()
-    except RuntimeError as e:
-        log.error("Не удалось создать эмбеддер для модели '%s': %s", body.model, e)
-        raise HTTPException(503, str(e)) from e
-
-    # 1. поиск релевантных фрагментов (эмбеддинг CPU-bound → в threadpool,
-    #    чтобы не блокировать event loop)
+    # 1. поиск релевантных фрагментов (общий код с MCP-инструментами)
     t_embed = time.monotonic()
-    try:
-        qvec = await run_in_threadpool(embedder.embed_query, msg)
-        # защита от рассинхрона размерностей (напр. провайдер сменил модель)
-        vectors = getattr(retriever, "vectors", None)
-        if vectors is not None and (qvec.ndim != 1 or qvec.shape[0] != vectors.shape[1]):
-            raise HTTPException(
-                503,
-                f"Модель '{body.model}' вернула вектор размерности {qvec.shape}, "
-                f"а индекс требует {vectors.shape[1]}. Выберите другую модель.",
-            )
-    except RuntimeError as e:
-        error_msg = str(e)
-        # Распознаём типичные ошибки API и даём понятное объяснение
-        if "403" in error_msg or "Access denied" in error_msg:
-            log.error("Embedding API заблокирован (403): %s", error_msg)
-            raise HTTPException(
-                503,
-                f"Модель '{body.model}' временно недоступна: API-провайдер заблокировал запросы с этого сервера. "
-                f"Попробуйте локальную модель или свяжитесь с администратором."
-            ) from e
-        elif "429" in error_msg or "rate limit" in error_msg.lower():
-            log.error("Embedding API rate limit: %s", error_msg)
-            raise HTTPException(429, f"Превышен лимит запросов для модели '{body.model}'. Попробуйте позже.") from e
-        else:
-            log.error("Ошибка эмбеддинга для модели '%s': %s", body.model, error_msg)
-            raise HTTPException(503, f"Не удалось обработать запрос с моделью '{body.model}': {error_msg[:200]}") from e
+    results = await _retrieve(msg, body.model, TOP_K)
     embed_ms = int((time.monotonic() - t_embed) * 1000)
 
-    results = retriever.search(qvec, top_k=TOP_K, types=SRC_TYPES_SET)
     context = build_context(results)
     top_score = results[0]["score"] if results else 0.0
 
@@ -505,3 +747,11 @@ def health():
 # т.к. это просто ассеты; сам index.html отдаётся через "/" с auth.
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# MCP для Cursor: монтируем только при заданном токене (нет токена — маршрута
+# нет вовсе, 404; поверхность атаки нулевая). Ни один из маршрутов выше не
+# перехватывает /mcp, поэтому порядок mount не важен.
+if MCP_API_KEY:
+    app.mount("/mcp", _MCPTokenAuth(_mcp_app, MCP_API_KEY), name="mcp")
+else:
+    log.warning("MCP_API_KEY не задан — /mcp (MCP-сервер для Cursor) отключён")

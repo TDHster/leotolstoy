@@ -15,6 +15,10 @@
 *secret*
 *credential*
 
+# MCP-конфиг Cursor: реальный файл может содержать токен MCP_API_KEY —
+# не в git. Пример без секретов: .cursor/mcp.json.example (коммитится).
+.cursor/mcp.json
+
 __pycache__/
 *.pyc
 .DS_Store

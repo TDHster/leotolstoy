@@ -38,11 +38,48 @@ class FakeRetriever:
             "display_name": "Fake Model"
         }
 
-    def search(self, qvec, top_k=5, types=None):
+    def search(self, qvec, top_k=5, types=None, addressee=None,
+               year_from=None, year_to=None, volume=None):
         return [
             {"text": "Труд есть условие жизни.", "source": "Письмо №1, 1880",
              "meta": {"type": "письмо", "year": "1880", "age": 52, "doc": "0"}, "score": 0.7},
         ]
+
+    def browse(self, types=None, addressee=None, year_from=None, year_to=None,
+               volume=None, limit=20, offset=0):
+        records = [{
+            "doc": "0", "type": "письмо", "date": "1880-01-01", "year": "1880",
+            "volume": "63", "addressee": "Страхов Николай Николаевич",
+            "number": "1", "entry": "1. Страхов Николай Николаевич, 1880",
+            "preview": "Труд есть условие жизни.",
+        }]
+        return len(records), records[offset:offset + limit]
+
+    def grep(self, pattern, whole_word=False, types=None, addressee=None,
+             year_from=None, year_to=None, volume=None, limit=20):
+        if pattern.lower() not in "труд есть условие жизни.".lower():
+            return {"count": 0, "chunks_matched": 0, "results": []}
+        if whole_word and pattern.casefold() == "труд есть":
+            return {"count": 0, "chunks_matched": 0, "results": []}
+        return {
+            "count": 1,
+            "chunks_matched": 1,
+            "results": [{
+                "text": "Труд есть условие жизни.",
+                "source": "Письмо №1, 1880",
+                "meta": {"type": "письмо", "year": "1880", "doc": "0"},
+                "matches": 1,
+            }],
+        }
+
+    def facets(self):
+        return {
+            "records_total": 1,
+            "types": {"письмо": 1},
+            "years": {"min": "1880", "max": "1880"},
+            "addressees": {"total": 1, "top": [{"name": "Страхов Николай Николаевич", "letters": 1}]},
+            "volumes": {"63": 1},
+        }
 
     def get_embedder(self):
         return FakeEmbedder()
@@ -62,6 +99,7 @@ def client(monkeypatch):
     monkeypatch.setenv("AUTH_FAIL_DELAY", "0")  # без задержки в тестах
     monkeypatch.setenv("RATE_LIMIT_CHAT", "1000/minute")  # не мешает обычным тестам
     monkeypatch.setenv("RATE_LIMIT_LOGIN", "1000/minute")
+    monkeypatch.setenv("MCP_API_KEY", "test-mcp-token")  # /mcp смонтирован
 
     # свежий импорт app с этими env
     for m in ("app", "embed", "retriever", "embedders"):

@@ -22,6 +22,9 @@
 └─ ./deploy.sh    тесты + rsync + compose    │    ├─ эмбеддинг запроса (ONNX, локально)
                                              │    ├─ косинус-поиск top-k (numpy) по index/
                                              │    ├─ GET /doc/{id} — полный текст (index/docs.json)
+                                             │    ├─ /mcp — MCP-сервер для Cursor
+                                             │    │   (streamable HTTP, Bearer MCP_API_KEY,
+                                             │    │    5 инструментов фактуры БЕЗ вызова LLM)
                                              │    └─ генерация (внешняя LLM)
                                              └─ make embeddings — сборка индекса НА СЕРВЕРЕ
                                                   (rsync индексы не возит: .rsyncignore index*/)
@@ -46,6 +49,11 @@
 - **Полный текст источника**: `index/docs.json` + `GET /doc/{id}` → модалка в UI
   с подсветкой кликнутого абзаца.
 - **Генерация — любой OpenAI-совместимый API** (эндпоинт в `.env`).
+- **MCP-сервер для Cursor** встроен в FastAPI: `/mcp` (streamable HTTP через
+  FastMCP), 5 инструментов фактуры — поиск фрагментов, навигация по
+  метаданным, полные тексты. **Внешнюю LLM из MCP НЕ вызывает** (генерацию
+  делает агент сам). Доступ только по Bearer-токену `MCP_API_KEY` (пусто =
+  /mcp выключен). На машине Cursor ничего ставить не нужно — URL + заголовок.
 - **Локально = HTTP без Docker; сервер = Caddy (HTTPS, Let's Encrypt) → Docker (HTTP)**.
 - **Домен**: https://verbatis.ru (доступ через валидный TLS-сертификат).
 
@@ -74,10 +82,11 @@
 | `scripts/setup_caddy.sh` | установка и настройка Caddy на сервере Ubuntu |
 | `Caddyfile` | конфигурация Caddy reverse proxy (копируется на сервер в `/etc/caddy/Caddyfile`) |
 | `CADDY_SETUP.md` | инструкция по переходу на Caddy + домен verbatis.ru |
-| `server/app.py` | FastAPI: auth, rate limit, RAG, вызов LLM, `GET /doc/{id}` (полный текст источника) |
-| `server/retriever.py` | загрузка индекса + косинусный поиск |
+| `server/app.py` | FastAPI: auth, rate limit, RAG, вызов LLM, `GET /doc/{id}` (полный текст источника), **MCP-сервер на /mcp** (FastMCP, 5 инструментов, Bearer `MCP_API_KEY`) |
+| `server/retriever.py` | загрузка индекса + косинусный поиск + метаданные (browse/grep/facets для MCP) |
 | `server/static/index.html` | фронт (чат, показ фрагментов-источников, клик по фрагменту → модалка с полным текстом) |
-| `tests/` | pytest: corpus, retriever, API (LLM/эмбеддер замоканы) |
+| `tests/` | pytest: corpus, retriever, API (LLM/эмбеддер замоканы), MCP (`test_mcp.py`) |
+| `.cursor/mcp.json.example` | конфиг MCP в Cursor (пример; реальный `.cursor/mcp.json` с токеном — вне git) |
 | `deploy.sh` + `.deploy` | деплой: прогон тестов → rsync → compose на сервере |
 
 ## Индекс (не в git)
@@ -116,6 +125,29 @@
   deploy.sh индексы не копирует и не удаляет.
 - Векторизация занимает ~6 ч на CPU сервера (~84 тыс. чанков, сентябрь 2026).
 
+## MCP для Cursor (/mcp)
+
+MCP-сервер (streamable HTTP, FastMCP 3.x) встроен в FastAPI — инструменты
+работают in-process рядом с индексом. **Внешнюю LLM не вызывает**: агент Cursor
+получает фактуру и генерирует сам. Инструменты:
+
+| Инструмент | Что делает |
+|---|---|
+| `tolstoy_search` | семантический поиск фрагментов (локальный эмбеддинг + numpy) с фильтрами: types / addressee / year_from / year_to / volume. Возвращает текст, source, score, полную meta |
+| `tolstoy_browse` | список ЗАПИСЕЙ по метаданным, по дате, с превью и пагинацией |
+| `tolstoy_facets` | словарь значений фильтров: типы, годы, топ-100 адресатов, тома (кешируется в Retriever) |
+| `tolstoy_doc` | полный текст записи + метаданные по doc_id (index/docs.json) |
+| `tolstoy_grep` | точный поиск слова/фразы по чанкам (регэксп, IGNORECASE, `whole_word` — `\b`), контекст ±150, счётчики вхождений |
+
+- Auth: Bearer `MCP_API_KEY` — проверяется ASGI-мидлварью `_MCPTokenAuth`
+  (FastAPI `Depends` на mount не работают). Пусто = /mcp не смонтирован.
+- Конфиг Cursor: `.cursor/mcp.json.example` (URL `https://verbatis.ru/mcp` +
+  заголовок Authorization); реальный файл с токеном — в `~/.cursor/mcp.json`
+  или проектном `.cursor/mcp.json` (в .gitignore).
+- Фильтры метаданных реализованы в `server/retriever.py` (`_meta_matches`,
+  `browse`, `grep`, `facets`) поверх уже загруженных в RAM чанков — индекс
+  пересобирать не нужно.
+
 ## Команды
 
 ```bash
@@ -152,14 +184,33 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
 
 Провайдер LLM: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (примеры в `.env.example`;
 старые `OPENROUTER_*` работают как fallback). Auth: `APP_USER`, `APP_PASS`.
+**MCP**: `MCP_API_KEY` (Bearer-токен /mcp; пусто = MCP выключен).
 Поиск: `TOP_K`, `SRC_TYPES` (типы: письмо/дневник/записная книжка/статья/трактат;
-пусто = все). Сборка: `EMBED_TYPES` (пусто = все типы Verbatis).
+пусто = все; также ограничивает MCP-инструменты). Сборка: `EMBED_TYPES` (пусто = все типы Verbatis).
 Лимиты: `RATE_LIMIT_CHAT`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_DOC` (GET /doc/{id}),
 `MAX_MESSAGE_CHARS`, `AUTH_FAIL_DELAY`.
 Логи: `LOG_LEVEL`, `LOG_QUERIES` (текст запросов — ПД, по умолчанию выкл).
 
 ## ⚠️ Подводные камни (важно)
 
+- **fastmcp закреплён `>=3.2.4,<4`** — fastmcp 4.x требует starlette>=1.0,
+  а fastapi 0.115.x требует starlette<0.47 (конфликт); fastmcp 3.x также
+  требует uvicorn>=0.35 (пин в pyproject поднят до `<0.55`). При смене версии
+  fastmcp проверять совместимость с fastapi/starlette.
+- **Combined lifespan обязателен** (`_combined_lifespan` в app.py): Starlette
+  не форвардит lifespan в mount-подприложения, а без `_mcp_app.lifespan` у
+  FastMCP не инициализируется session manager — /mcp отдавал бы 500.
+- **Auth на /mcp — только ASGI-мидлварью** (`_MCPTokenAuth`): FastAPI
+  `Depends` на mount не работают. Токен сравнивается через `compare_digest`,
+  ошибка — 401 JSON с задержкой `AUTH_FAIL_DELAY`.
+- **MCP-сессии — в памяти процесса**: `--workers 1` обязателен (уже в
+  Dockerfile и Makefile — не менять). После рестарта контейнера Cursor
+  переподключается сам.
+- **`/mcp` → 307 на `/mcp/`** — стандартное поведение Starlette для mount
+  (redirect_slashes); MCP-клиенты следуют редиректу. Чтобы Location генерился
+  со схемой https за Caddy, uvicorn запускается с `--proxy-headers` и
+  `FORWARDED_ALLOW_IPS=*` (в Dockerfile): без второго контейнер видит
+  источником адрес docker-моста, а не loopback, и заголовки отбрасывает.
 - **НЕ добавлять `from __future__ import annotations` в `server/app.py`** — slowapi
   оборачивает роуты, при строковых аннотациях FastAPI теряет тело запроса (body
   становится query-параметром → все запросы 422). Держим реальные аннотации.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 import numpy as np
 
@@ -20,6 +21,40 @@ INDEX_DIR = os.environ.get("INDEX_DIR", os.path.join(ROOT, "index"))
 log = logging.getLogger("tolstoy.retriever")
 
 _INT8_SEARCH_BLOCK = 2048  # строк индекса на один float32-блок при int8-поиске (~32 МБ)
+
+
+def _year_bounds(year) -> tuple[int, int] | None:
+    """(min, max) годов из поля meta["year"]: "1900" или диапазон "1900–1910"."""
+    nums = re.findall(r"\d{4}", str(year or ""))
+    if not nums:
+        return None
+    return int(nums[0]), int(nums[-1])
+
+
+def _meta_matches(meta: dict, types: set[str] | None, addressee: str | None,
+                  year_from: int | None, year_to: int | None,
+                  volume: str | None) -> bool:
+    """Фильтр чанка по метаданным. Пустые параметры фильтра не ограничивают."""
+    if types and meta.get("type") not in types:
+        return False
+    if addressee:
+        # подстрока: агент может написать «Чертков» вместо полного имени
+        who = str(meta.get("addressee") or meta.get("to") or "")
+        if addressee.casefold() not in who.casefold():
+            return False
+    if year_from is not None or year_to is not None:
+        bounds = _year_bounds(meta.get("year"))
+        if bounds is None:
+            return False
+        if year_from is not None and bounds[1] < year_from:
+            return False
+        if year_to is not None and bounds[0] > year_to:
+            return False
+    if volume is not None:
+        vol = str(meta.get("vol") or meta.get("volume") or "")
+        if vol != str(volume):
+            return False
+    return True
 
 
 class Retriever:
@@ -85,6 +120,8 @@ class Retriever:
 
         assert len(self.chunks) == self.vectors.shape[0], f"рассинхрон: {len(self.chunks)} чанков vs {self.vectors.shape[0]} векторов"
 
+        self._facets: dict | None = None  # кеш facets() — считается лениво, один раз
+
         # Проверка совместимости
         expected_dim = self.metadata.get("dimensions", self.vectors.shape[1])
         if self.vectors.shape[1] != expected_dim:
@@ -137,12 +174,16 @@ class Retriever:
             )
 
     def search(self, query_vec: np.ndarray, top_k: int = 5,
-               types: set[str] | None = None) -> list[dict]:
+               types: set[str] | None = None, addressee: str | None = None,
+               year_from: int | None = None, year_to: int | None = None,
+               volume: str | None = None) -> list[dict]:
         """
         query_vec — L2-нормализованный вектор запроса (EMBED_DIM,), float32.
 
         int8-индекс: запрос квантизуется той же схемой, что и сборка.
         float16/float32-индекс: ищется как есть (нормы ≈ 1 → dot ≈ cosine).
+        Помимо types доступны фильтры по метаданным (addressee/год/том) —
+        для MCP-инструментов; существующие вызовы без них работают как раньше.
         """
         if not np.isfinite(query_vec).all():
             log.warning("Вектор запроса содержит NaN/inf — поиск пропущен")
@@ -172,9 +213,11 @@ class Retriever:
         else:
             scores = self.vectors @ query_vec_search
 
-        if types:
+        if types or addressee or year_from is not None or year_to is not None or volume is not None:
             mask = np.array(
-                [c["meta"].get("type") in types for c in self.chunks], dtype=bool
+                [_meta_matches(c["meta"], types, addressee, year_from, year_to, volume)
+                 for c in self.chunks],
+                dtype=bool,
             )
             scores = np.where(mask, scores, -np.inf)
 
@@ -195,6 +238,132 @@ class Retriever:
                 "score": float(scores[i]),
             })
         return results
+
+    def browse(self, types: set[str] | None = None, addressee: str | None = None,
+               year_from: int | None = None, year_to: int | None = None,
+               volume: str | None = None, limit: int = 20,
+               offset: int = 0) -> tuple[int, list[dict]]:
+        """Список ЗАПИСЕЙ (группировка чанков по meta["doc"]) под фильтры.
+
+        Возвращает (total, records): записи с превью первого чанка, по дате,
+        с пагинацией. Для MCP-навигации по переписке («все письма Черткову
+        за 1890-е») — полный текст записи берётся отдельно по doc.
+        """
+        recs: dict[str, dict] = {}
+        for c in self.chunks:
+            meta = c["meta"]
+            if not _meta_matches(meta, types, addressee, year_from, year_to, volume):
+                continue
+            doc = str(meta.get("doc", ""))
+            if doc in recs:
+                continue
+            recs[doc] = {
+                "doc": doc,
+                "type": meta.get("type", ""),
+                "date": str(meta.get("date") or ""),
+                "year": meta.get("year", ""),
+                "volume": meta.get("vol", ""),
+                "addressee": str(meta.get("addressee") or meta.get("to") or ""),
+                "number": str(meta.get("number") or meta.get("num") or ""),
+                "entry": str(meta.get("entry") or meta.get("title") or ""),
+                "preview": c["text"][:200],
+            }
+        ordered = sorted(
+            recs.values(),
+            key=lambda r: (str(r["date"] or r["year"] or ""), r["doc"]),
+        )
+        return len(ordered), ordered[offset:offset + limit]
+
+    def grep(self, pattern: str, whole_word: bool = False,
+             types: set[str] | None = None, addressee: str | None = None,
+             year_from: int | None = None, year_to: int | None = None,
+             volume: str | None = None, limit: int = 20) -> dict:
+        """Точный поиск слова/фразы по текстам чанков (без эмбеддинга).
+
+        Возвращает суммарное число вхождений по всем подходящим чанкам и до
+        limit чанков с контекстом ±150 символов вокруг первого вхождения.
+        Фильтры дают частотность: «сколько раз слово X встречается в письмах
+        Черткову за 1890-е». Регистронезависимый; whole_word=True — границы
+        слова (юникодные \\b, работает с кириллицей).
+        """
+        rx = re.compile(
+            rf"\b{re.escape(pattern)}\b" if whole_word else re.escape(pattern),
+            re.IGNORECASE,
+        )
+        results: list[dict] = []
+        total_matches = 0
+        chunks_matched = 0
+        for c in self.chunks:
+            if not _meta_matches(c["meta"], types, addressee, year_from, year_to, volume):
+                continue
+            m = rx.search(c["text"])
+            if m is None:
+                continue
+            chunks_matched += 1
+            total_matches += len(rx.findall(c["text"]))
+            if len(results) < limit:
+                text = c["text"]
+                start = max(0, m.start() - 150)
+                end = min(len(text), m.end() + 150)
+                snippet = ("…" if start > 0 else "") + text[start:end] + \
+                          ("…" if end < len(text) else "")
+                results.append({
+                    "text": snippet,
+                    "source": c["source"],
+                    "meta": c["meta"],
+                    "matches": len(rx.findall(text)),
+                })
+        return {
+            "count": total_matches,
+            "chunks_matched": chunks_matched,
+            "results": results,
+        }
+
+    def facets(self) -> dict:
+        """Словарь значений для фильтров — по ЗАПИСЯМ, не по чанкам.
+
+        Считается один раз (полный проход по чанкам) и кешируется: типы со
+        счётчиками записей, диапазон лет, топ-100 адресатов писем, тома.
+        Для MCP: агент узнаёт валидные значения фильтров до запросов.
+        """
+        if self._facets is not None:
+            return self._facets
+        from collections import Counter
+
+        seen: set[str] = set()
+        types_c, years_c, addrs_c, vols_c = Counter(), Counter(), Counter(), Counter()
+        for c in self.chunks:
+            meta = c["meta"]
+            doc = str(meta.get("doc", ""))
+            if doc in seen:
+                continue
+            seen.add(doc)
+            types_c[meta.get("type", "")] += 1
+            years_c[str(meta.get("year") or "")] += 1
+            if meta.get("type") == "письмо":
+                who = str(meta.get("addressee") or meta.get("to") or "").strip()
+                if who:
+                    addrs_c[who] += 1
+            vol = str(meta.get("vol") or meta.get("volume") or "")
+            if vol:
+                vols_c[vol] += 1
+
+        year_vals = [y for y in years_c if re.match(r"\d{4}", y)]
+        self._facets = {
+            "records_total": len(seen),
+            "types": {t: n for t, n in types_c.most_common()},
+            "years": {
+                "min": min(year_vals) if year_vals else None,
+                "max": max(year_vals) if year_vals else None,
+            },
+            "addressees": {
+                "total": len(addrs_c),
+                "top": [{"name": n, "letters": cnt} for n, cnt in addrs_c.most_common(100)],
+            },
+            "volumes": {v: vols_c[v] for v in sorted(
+                vols_c, key=lambda v: int(v) if v.isdigit() else 0)},
+        }
+        return self._facets
 
     def __len__(self) -> int:
         return len(self.chunks)

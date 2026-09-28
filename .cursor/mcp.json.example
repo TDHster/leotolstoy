@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tolstoy": {
+      "url": "https://verbatis.ru/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:MCP_API_KEY}"
+      }
+    }
+  }
+}

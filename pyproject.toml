@@ -9,9 +9,14 @@ dependencies = [
     "numpy>=1.24,<3",
     # Сервер
     "fastapi>=0.110,<0.116",
-    "uvicorn[standard]>=0.27,<0.35",
+    # uvicorn>=0.35 нужен для fastmcp 3.x (см. ниже)
+    "uvicorn[standard]>=0.35,<0.55",
     "httpx>=0.27,<0.29",
     "python-dotenv>=1.0,<2.0",
+    # MCP-сервер для Cursor (streamable HTTP на /mcp внутри FastAPI).
+    # ВАЖНО: не поднимать на 4.x — fastmcp 4 требует starlette>=1.0,
+    # а fastapi 0.115.x требует starlette<0.47 (конфликт).
+    "fastmcp>=3.2.4,<4",
     # rate limiting (защита от абьюза и брутфорса)
     "slowapi>=0.1.9,<0.2",
     # Парсинг HTML (для EPUB → txt конвертации)

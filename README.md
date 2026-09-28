@@ -61,6 +61,42 @@ make run           # http://localhost:8000  (логин из .env)
 Legacy: `scripts/epub_to_txt.py` (EPUB → tom*.txt, проза) и `scripts/tei_to_txt.py`
 (TEI/XML → tei_*.txt) остаются в репо как справочные — в пайплайн не входят.
 
+## MCP для Cursor (инструменты корпуса)
+
+MCP-сервер встроен в приложение: `https://verbatis.ru/mcp` (streamable HTTP).
+Даёт агенту Cursor фактуру корпуса — **без вызовов внешней LLM** (генерацию
+агент делает сам):
+
+| Инструмент | Что делает |
+|---|---|
+| `tolstoy_search` | семантический поиск фрагментов с фильтрами (тип, адресат, годы, том) |
+| `tolstoy_browse` | списки записей по метаданным (напр. «письма Черткову за 1890-е») |
+| `tolstoy_facets` | словарь значений фильтров (типы, годы, адресаты, тома) |
+| `tolstoy_doc` | полный текст записи по id |
+| `tolstoy_grep` | точный поиск слова/фразы с контекстом и счётчиками |
+
+**Настройка (на машине Cursor ничего ставить не нужно):**
+
+1. На сервере в `.env` задать `MCP_API_KEY` (сгенерировать:
+   `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`).
+2. В Cursor создать `~/.cursor/mcp.json` (глобально, вне репозитория):
+
+```json
+{
+  "mcpServers": {
+    "tolstoy": {
+      "url": "https://verbatis.ru/mcp",
+      "headers": { "Authorization": "Bearer ВАШ_MCP_API_KEY" }
+    }
+  }
+}
+```
+
+3. Перезапустить Cursor — сервер появится в Settings → Tools & Integrations → MCP.
+
+Доступ — только по токену: без него `/mcp` возвращает 401, а если токен не
+задан на сервере — маршрута нет вовсе. Пример конфига — `.cursor/mcp.json.example`.
+
 ## Деплой на сервер (Docker + Caddy + Let's Encrypt)
 
 - **Локально** — HTTP, без Docker (`make run`), для разработки.
@@ -141,12 +177,13 @@ docker compose up -d --build   # пересобрать после измене�
 ## Тесты
 
 ```bash
-uv run pytest        # 108 тестов, ~0.4с, без сети и без загрузки модели
+uv run pytest        # 118 тестов, ~1с, без сети и без загрузки модели
 ```
 
 Покрытие: парсинг/чанкинг корпуса, косинусный поиск (на синтетическом индексе),
 API через FastAPI TestClient с замоканными эмбеддером и LLM — auth, rate limit,
-лимит длины сообщения, health, favicon.
+лимит длины сообщения, health, favicon; MCP — протокол streamable HTTP, токен,
+5 инструментов.
 
 **Деплой прогоняет тесты сам:** `deploy.sh` перед синхронизацией запускает
 `pytest tests/` и **прерывает деплой (exit 1) при любом провале** — на сервер
