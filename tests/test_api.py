@@ -35,6 +35,8 @@ def test_chat_ok(client):
     assert data["sources"][0]["source"] == "Письмо №1, 1880"
     # оригинальный текст фрагмента возвращается
     assert "text" in data["sources"][0]
+    # возраст Толстого для показа в «Источниках» (перед cos φ)
+    assert data["sources"][0]["age"] == 52
     # id полного текста для модалки /doc
     assert data["sources"][0]["doc"] == "0"
 

@@ -306,9 +306,19 @@ const docSnippets = [];
 
 function addSources(list, modelName) {
   if (!list || !list.length) return;
+  // сортировка по возрасту Толстого (хронология жизни): по возрастанию,
+  // фрагменты без возраста — в конец (в порядке релевантности между собой)
+  const byAge = [...list].sort((a, b) => {
+    const aa = (a.age != null && a.age !== '') ? Number(a.age) : null;
+    const bb = (b.age != null && b.age !== '') ? Number(b.age) : null;
+    if (aa == null && bb == null) return 0;
+    if (aa == null) return 1;
+    if (bb == null) return -1;
+    return aa - bb;
+  });
   const d = document.createElement('div');
   d.className = 'sources';
-  const items = list.map(s => {
+  const items = byAge.map(s => {
     // ссылка «открыть полностью» — только если у фрагмента есть doc_id
     let openLink = '';
     if (s.doc) {
@@ -322,7 +332,7 @@ function addSources(list, modelName) {
     return `
     <li>
       <details>
-        <summary>${esc(s.source)} <span class="score" title="Косинус угла между запросом и фрагментом: 1 — совпадение по смыслу, меньше — дальше">(cos φ = ${esc(s.score)})</span></summary>
+        <summary>${esc(s.source)} <span class="score" title="Косинус угла между запросом и фрагментом: 1 — совпадение по смыслу, меньше — дальше">${s.age != null && s.age !== '' ? `(возраст: ${esc(s.age)}, cos φ = ${esc(s.score)})` : `(cos φ = ${esc(s.score)})`}</span></summary>
         <blockquote>${esc(s.text)}${openLink}</blockquote>
       </details>
     </li>`;

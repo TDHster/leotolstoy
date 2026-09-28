@@ -41,7 +41,7 @@ class FakeRetriever:
     def search(self, qvec, top_k=5, types=None):
         return [
             {"text": "Труд есть условие жизни.", "source": "Письмо №1, 1880",
-             "meta": {"type": "письмо", "year": "1880", "doc": "0"}, "score": 0.7},
+             "meta": {"type": "письмо", "year": "1880", "age": 52, "doc": "0"}, "score": 0.7},
         ]
 
     def get_embedder(self):

@@ -432,6 +432,7 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
             "text": r["text"],  # оригинальный фрагмент, ушедший в модель
             "type": r["meta"].get("type", ""),
             "year": r["meta"].get("year", ""),
+            "age": r["meta"].get("age", ""),  # возраст Толстого (полные годы на дату записи)
             "doc": r["meta"].get("doc", ""),  # id полного текста в index/docs.json ("" для старых индексов)
         }
         for r in results
