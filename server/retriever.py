@@ -277,11 +277,13 @@ class Retriever:
     def grep(self, pattern: str, whole_word: bool = False,
              types: set[str] | None = None, addressee: str | None = None,
              year_from: int | None = None, year_to: int | None = None,
-             volume: str | None = None, limit: int = 20) -> dict:
+             volume: str | None = None, limit: int = 20,
+             offset: int = 0) -> dict:
         """Точный поиск слова/фразы по текстам чанков (без эмбеддинга).
 
         Возвращает суммарное число вхождений по всем подходящим чанкам и до
-        limit чанков с контекстом ±150 символов вокруг первого вхождения.
+        limit чанков (начиная с offset-го совпадения) с контекстом ±150
+        символов вокруг первого вхождения.
         Фильтры дают частотность: «сколько раз слово X встречается в письмах
         Черткову за 1890-е». Регистронезависимый; whole_word=True — границы
         слова (юникодные \\b, работает с кириллицей).
@@ -301,7 +303,7 @@ class Retriever:
                 continue
             chunks_matched += 1
             total_matches += len(rx.findall(c["text"]))
-            if len(results) < limit:
+            if chunks_matched > offset and len(results) < limit:
                 text = c["text"]
                 start = max(0, m.start() - 150)
                 end = min(len(text), m.end() + 150)

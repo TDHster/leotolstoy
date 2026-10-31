@@ -133,11 +133,11 @@ MCP-сервер (streamable HTTP, FastMCP 3.x) встроен в FastAPI — и
 
 | Инструмент | Что делает |
 |---|---|
-| `tolstoy_search` | семантический поиск фрагментов (локальный эмбеддинг + numpy) с фильтрами: types / addressee / year_from / year_to / volume. Возвращает текст, source, score, полную meta |
+| `tolstoy_search` | семантический поиск фрагментов (локальный эмбеддинг + numpy) с фильтрами: types / addressee / year_from / year_to / volume, `min_score` (отсечка). Возвращает текст, source, score, полную meta |
 | `tolstoy_browse` | список ЗАПИСЕЙ по метаданным, по дате, с превью и пагинацией |
 | `tolstoy_facets` | словарь значений фильтров: типы, годы, топ-100 адресатов, тома (кешируется в Retriever) |
 | `tolstoy_doc` | полный текст записи + метаданные по doc_id (index/docs.json) |
-| `tolstoy_grep` | точный поиск слова/фразы по чанкам (регэксп, IGNORECASE, `whole_word` — `\b`), контекст ±150, счётчики вхождений |
+| `tolstoy_grep` | точный поиск слова/фразы по чанкам (регэксп, IGNORECASE, `whole_word` — `\b`), контекст ±150, счётчики вхождений, пагинация `offset` (limit ≤ 50) |
 
 - Auth: Bearer `MCP_API_KEY` — проверяется ASGI-мидлварью `_MCPTokenAuth`
   (FastAPI `Depends` на mount не работают). Пусто = /mcp не смонтирован.
@@ -185,7 +185,10 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
 Провайдер LLM: `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` (примеры в `.env.example`;
 старые `OPENROUTER_*` работают как fallback). Auth: `APP_USER`, `APP_PASS`.
 **MCP**: `MCP_API_KEY` (Bearer-токен /mcp; пусто = MCP выключен).
-Поиск: `TOP_K`, `SRC_TYPES` (типы: письмо/дневник/записная книжка/статья/трактат;
+Поиск: `TOP_K` (потолок фрагментов), отсечка слабых — `MIN_SCORE` (абс. косинус),
+`REL_SCORE` (доля от лучшего), `MIN_K` (сколько оставить, если порог не прошёл
+никто; тогда LLM получает пометку «прямой опоры нет»); 0 = выключено. Калибровка
+на MiniLM: темы корпуса ~0.65–0.9, запросы «мимо» ~0.3–0.5 → 0.6 / 0.9. `SRC_TYPES` (типы: письмо/дневник/записная книжка/статья/трактат;
 пусто = все; также ограничивает MCP-инструменты). Сборка: `EMBED_TYPES` (пусто = все типы Verbatis).
 Лимиты: `RATE_LIMIT_CHAT`, `RATE_LIMIT_LOGIN`, `RATE_LIMIT_DOC` (GET /doc/{id}),
 `MAX_MESSAGE_CHARS`, `AUTH_FAIL_DELAY`.

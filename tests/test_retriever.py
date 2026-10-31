@@ -253,3 +253,15 @@ def test_search_nan_query_returns_empty(tiny_index):
     """NaN-запрос (битый ответ эмбеддера) не должен ронять поиск."""
     r = Retriever(index_dir=tiny_index)
     assert r.search(np.array([np.nan, 0, 0], dtype=np.float32), top_k=3) == []
+
+
+def test_grep_offset_pagination(tiny_index):
+    r = Retriever(index_dir=tiny_index)
+    # «про» есть во всех трёх чанках
+    first = r.grep("про", limit=2)
+    second = r.grep("про", limit=2, offset=2)
+    assert first["chunks_matched"] == second["chunks_matched"] == 3
+    assert first["count"] == second["count"] == 3
+    assert [x["source"] for x in first["results"]] == ["Письмо A", "Дневник B"]
+    assert [x["source"] for x in second["results"]] == ["Письмо C"]
+    assert r.grep("про", offset=3)["results"] == []

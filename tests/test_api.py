@@ -109,3 +109,45 @@ def test_display_name_local_from_env(client, monkeypatch):
 
     # внешние модели — как раньше, из display_name
     assert app._display_name("qwen3-embedding-8b", {"display_name": "Qwen3 Embedding 8B"}) == "Qwen3 Embedding 8B"
+
+
+def test_filter_by_score(client):
+    f = client._app_module.filter_by_score
+    res = [{"score": s} for s in (0.9, 0.82, 0.7, 0.5)]
+    # пороги 0 — как раньше, всё проходит
+    assert f(res, 0, 0, 1) == (res, False)
+    # абсолютный порог
+    assert [r["score"] for r in f(res, 0.6, 0, 1)[0]] == [0.9, 0.82, 0.7]
+    # относительный: 0.9 * 0.9 = 0.81
+    assert [r["score"] for r in f(res, 0.6, 0.9, 1)[0]] == [0.9, 0.82]
+    # никто не прошёл — MIN_K лучших и weak
+    assert f(res, 0.95, 0, 1) == (res[:1], True)
+    assert f(res, 0.95, 0, 0) == ([], True)
+    assert f([], 0.6, 0.9, 1) == ([], True)
+
+
+def test_chat_weak_sources_note(client, monkeypatch):
+    """Порог не прошёл никто → 1 лучший фрагмент + пометка в промпте для LLM."""
+    app = client._app_module
+    monkeypatch.setattr(app, "MIN_SCORE", 0.95)
+    sent = {}
+
+    class Resp:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            sent.update(json)
+            return Resp()
+
+    monkeypatch.setattr(app.httpx, "AsyncClient", Client)
+    r = client.post("/chat", json={"message": "привет"}, auth=AUTH)
+    assert r.status_code == 200
+    assert len(r.json()["sources"]) == 1
+    assert "Прямой опоры" in sent["messages"][1]["content"]

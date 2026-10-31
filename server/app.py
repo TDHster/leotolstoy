@@ -62,6 +62,12 @@ LLM_BASE_URL = (os.environ.get("LLM_BASE_URL")
 LLM_URL = LLM_BASE_URL + "/chat/completions"
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
 TOP_K = int(os.environ.get("TOP_K", "5"))
+# отсечка нерелевантных фрагментов (TOP_K остаётся потолком); 0 = выключено.
+# MIN_SCORE — абсолютный порог косинуса, REL_SCORE — доля от лучшего score,
+# MIN_K — сколько лучших оставить, если порог не прошёл никто.
+MIN_SCORE = float(os.environ.get("MIN_SCORE", "0"))
+REL_SCORE = float(os.environ.get("REL_SCORE", "0"))
+MIN_K = int(os.environ.get("MIN_K", "1"))
 # ограничение типов источников: "письмо" / "дневник" / "письмо,дневник"
 SRC_TYPES = os.environ.get("SRC_TYPES", "").strip()
 SRC_TYPES_SET = {t.strip() for t in SRC_TYPES.split(",") if t.strip()} or None
@@ -315,6 +321,7 @@ async def tolstoy_search(
     year_from: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год от (включительно)")] = None,
     year_to: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год до (включительно)")] = None,
     volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
+    min_score: Annotated[float, Field(default=0, ge=0, le=1, description="Отбросить фрагменты с score ниже (0 = без порога; ~0.6 — только близкие по смыслу)")] = 0,
 ) -> dict:
     """Семантический поиск по корпусу Толстого БЕЗ вызова LLM.
 
@@ -337,6 +344,8 @@ async def tolstoy_search(
         )
     except HTTPException as e:
         raise ValueError(str(e.detail)) from e
+    if min_score > 0:
+        results = [r for r in results if r["score"] >= min_score]
     return {
         "query": query,
         "count": len(results),
@@ -421,29 +430,33 @@ async def tolstoy_grep(
     year_to: Annotated[int | None, Field(default=None, ge=1840, le=1910, description="Год до (включительно)")] = None,
     volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
     limit: Annotated[int, Field(default=20, ge=1, le=50, description="Сколько чанков с контекстом вернуть (1-50)")] = 20,
+    offset: Annotated[int, Field(default=0, ge=0, description="Сдвиг для пагинации (по совпавшим чанкам)")] = 0,
 ) -> dict:
     """Точный поиск слова/фразы по текстам чанков, БЕЗ вызова LLM.
 
     Регистронезависимый. Возвращает суммарное число вхождений по корпусу
     (с учётом фильтров), число задетых чанков и до limit фрагментов с контекстом
-    ±150 символов вокруг первого вхождения. Фильтры дают частотность:
+    ±150 символов вокруг первого вхождения. Если chunks_matched больше
+    offset + limit — листай дальше, увеличивая offset. Фильтры дают частотность:
     «сколько раз „смерть“ встречается в письмах Черткову за 1890-е».
     Орфография корпуса нормализована (ё/ъ) — если слово не нашлось,
     попробуй tolstoy_search."""
     types_set = _type_filter(types)
     if types and not types_set:
-        return {"count": 0, "chunks_matched": 0, "results": [],
+        return {"count": 0, "chunks_matched": 0, "offset": offset, "limit": limit,
+                "results": [],
                 "note": "Фильтр типов не пересекается с ограничением сервера (SRC_TYPES)"}
     try:
         retriever = _get_retriever("local")
-        return await run_in_threadpool(
+        data = await run_in_threadpool(
             retriever.grep,
             pattern, whole_word, types_set, addressee, year_from, year_to,
             str(volume) if volume is not None else None,
-            limit,
+            limit, offset,
         )
     except HTTPException as e:
         raise ValueError(str(e.detail)) from e
+    return {**data, "offset": offset, "limit": limit}
 
 
 # Starlette-приложение MCP со СВОИМ lifespan (session manager streamable HTTP).
@@ -499,6 +512,26 @@ class ChatIn(BaseModel):
 class ChatOut(BaseModel):
     reply: str
     sources: list[dict]
+
+
+def filter_by_score(results: list[dict], min_score: float, rel_score: float,
+                    min_k: int) -> tuple[list[dict], bool]:
+    """Отсекает слабые фрагменты из top-K (results отсортированы по score).
+
+    Возвращает (фрагменты, weak): weak=True — порог не прошёл никто, оставлены
+    min_k лучших (или ничего), прямой опоры в текстах нет.
+    """
+    if not results:
+        return [], True
+    floor = float("-inf")
+    if min_score > 0:
+        floor = min_score
+    if rel_score > 0:
+        floor = max(floor, results[0]["score"] * rel_score)
+    kept = [r for r in results if r["score"] >= floor]
+    if kept:
+        return kept, False
+    return results[:min_k], True
 
 
 def build_context(results: list[dict]) -> str:
@@ -610,14 +643,24 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
     results = await _retrieve(msg, body.model, TOP_K)
     embed_ms = int((time.monotonic() - t_embed) * 1000)
 
-    context = build_context(results)
     top_score = results[0]["score"] if results else 0.0
+    results, weak = filter_by_score(results, MIN_SCORE, REL_SCORE, MIN_K)
+    context = build_context(results)
 
     # 2. промпт для LLM
-    user_content = (
-        f"Вопрос собеседника: {msg}\n\n"
-        f"Подлинные фрагменты писем и дневников Толстого для опоры:\n\n{context}"
-    )
+    if not results:
+        sources_part = "Подходящих фрагментов в текстах Толстого не нашлось."
+    elif weak:
+        sources_part = (
+            "Прямой опоры в текстах Толстого по этому вопросу нет; фрагмент ниже "
+            "связан с вопросом лишь отдалённо — не притягивай его, если он не к месту:"
+            f"\n\n{context}"
+        )
+    else:
+        sources_part = (
+            f"Подлинные фрагменты писем и дневников Толстого для опоры:\n\n{context}"
+        )
+    user_content = f"Вопрос собеседника: {msg}\n\n{sources_part}"
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -656,10 +699,12 @@ async def chat(request: Request, body: ChatIn, _user: str = Depends(auth)):
 
     total_ms = int((time.monotonic() - t0) * 1000)
     log.info(
-        "chat: model=%s len=%d top_score=%.3f embed=%dms llm=%dms total=%dms",
+        "chat: model=%s len=%d top_score=%.3f kept=%d%s embed=%dms llm=%dms total=%dms",
         body.model,
         len(msg),
         top_score,
+        len(results),
+        " (weak)" if weak else "",
         embed_ms,
         llm_ms,
         total_ms,

@@ -177,3 +177,21 @@ def test_mcp_disabled_without_key(monkeypatch):
         # но чистый выход надёжнее)
         for m in ("app", "embed", "retriever", "embedders"):
             sys.modules.pop(m, None)
+
+
+def test_mcp_search_min_score(client):
+    session = _init_mcp(client)
+    # у заглушки единственный фрагмент со score 0.7
+    data = _tool_data(_call_tool(client, session, "tolstoy_search",
+                                 {"query": "труд", "min_score": 0.6}))
+    assert data["count"] == 1
+    data = _tool_data(_call_tool(client, session, "tolstoy_search",
+                                 {"query": "труд", "min_score": 0.8}))
+    assert data["count"] == 0
+
+
+def test_mcp_grep_offset(client):
+    session = _init_mcp(client)
+    data = _tool_data(_call_tool(client, session, "tolstoy_grep",
+                                 {"pattern": "труд", "offset": 5, "limit": 10}))
+    assert data["offset"] == 5 and data["limit"] == 10

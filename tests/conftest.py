@@ -56,7 +56,7 @@ class FakeRetriever:
         return len(records), records[offset:offset + limit]
 
     def grep(self, pattern, whole_word=False, types=None, addressee=None,
-             year_from=None, year_to=None, volume=None, limit=20):
+             year_from=None, year_to=None, volume=None, limit=20, offset=0):
         if pattern.lower() not in "труд есть условие жизни.".lower():
             return {"count": 0, "chunks_matched": 0, "results": []}
         if whole_word and pattern.casefold() == "труд есть":
