@@ -129,6 +129,13 @@ def test_mcp_grep(client):
                                  {"pattern": "труд"}))
     assert data["count"] == 1
     assert data["results"][0]["matches"] == 1
+    assert data["results"][0]["chunk_id"] == "v63_001#0"
+    assert data["results"][0]["spans"] == [[0, 4]]
+    assert data["results"][0]["text"] == "Труд есть…"
+    # full=True пробрасывается в retriever — чанк целиком
+    data = _tool_data(_call_tool(client, session, "tolstoy_grep",
+                                 {"pattern": "труд", "full": True}))
+    assert data["results"][0]["text"] == "Труд есть условие жизни."
     # whole_word: «труд есть» как целое слово не находится (два слова)
     data = _tool_data(_call_tool(client, session, "tolstoy_grep",
                                  {"pattern": "труд есть", "whole_word": True}))

@@ -56,7 +56,8 @@ class FakeRetriever:
         return len(records), records[offset:offset + limit]
 
     def grep(self, pattern, whole_word=False, types=None, addressee=None,
-             year_from=None, year_to=None, volume=None, limit=20, offset=0):
+             year_from=None, year_to=None, volume=None, limit=20, offset=0,
+             full=False):
         if pattern.lower() not in "труд есть условие жизни.".lower():
             return {"count": 0, "chunks_matched": 0, "results": []}
         if whole_word and pattern.casefold() == "труд есть":
@@ -65,10 +66,13 @@ class FakeRetriever:
             "count": 1,
             "chunks_matched": 1,
             "results": [{
-                "text": "Труд есть условие жизни.",
+                # full=False — имитация обрезанного сниппета
+                "text": "Труд есть условие жизни." if full else "Труд есть…",
                 "source": "Письмо №1, 1880",
                 "meta": {"type": "письмо", "year": "1880", "doc": "0"},
+                "chunk_id": "v63_001#0",
                 "matches": 1,
+                "spans": [[0, 4]],
             }],
         }
 

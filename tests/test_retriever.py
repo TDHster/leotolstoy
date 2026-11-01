@@ -265,3 +265,37 @@ def test_grep_offset_pagination(tiny_index):
     assert [x["source"] for x in first["results"]] == ["Письмо A", "Дневник B"]
     assert [x["source"] for x in second["results"]] == ["Письмо C"]
     assert r.grep("про", offset=3)["results"] == []
+
+
+def test_grep_full_chunk_spans_and_id(tmp_path):
+    """full=True — чанк целиком; spans — все вхождения; chunk_id постоянный."""
+    text = "Труд — начало. " + "х" * 400 + " Без труда нет жизни, труд есть благо."
+    vecs = [[1, 0, 0], [0, 1, 0]]
+    chunks = [
+        {"text": text, "source": "Письмо A",
+         "meta": {"type": "письмо", "year": "1880", "id": "v63_001", "chunk": "2"}},
+        {"text": "про смерть", "source": "Дневник B", "meta": {"type": "дневник"}},
+    ]
+    r = Retriever(index_dir=_make_index(tmp_path, vecs, chunks))
+
+    res = r.grep("труд", full=True)
+    assert res["count"] == 3 and res["chunks_matched"] == 1
+    item = res["results"][0]
+    assert item["text"] == text
+    assert item["chunk_id"] == "v63_001#2"
+    assert item["matches"] == len(item["spans"]) == 3
+    assert [text[s:e].lower() for s, e in item["spans"]] == ["труд"] * 3
+    assert "snippet_start" not in item
+
+    # сниппет: spans те же (относительно полного чанка), snippet_start сдвигает их
+    snip = r.grep("труд")["results"][0]
+    assert snip["spans"] == item["spans"]
+    assert snip["snippet_start"] == 0
+    assert len(snip["text"]) < len(text) and snip["text"].endswith("…")
+
+
+def test_chunk_id_absent_for_old_index(tiny_index):
+    """Индексы без id записи: chunk_id пустой, поиск не падает."""
+    r = Retriever(index_dir=tiny_index)
+    assert r.grep("про труд")["results"][0]["chunk_id"] == ""
+    assert r.search(np.array([1, 0, 0], dtype=np.float32), top_k=1)[0]["chunk_id"] == ""

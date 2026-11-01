@@ -31,6 +31,15 @@ def _year_bounds(year) -> tuple[int, int] | None:
     return int(nums[0]), int(nums[-1])
 
 
+def chunk_id(meta: dict) -> str:
+    """Постоянный id чанка: id записи Verbatis + номер чанка в записи.
+
+    В отличие от meta["doc"] (сквозной счётчик) не сдвигается при изменении
+    других записей корпуса. "" для индексов без id записи."""
+    rec = meta.get("id")
+    return f"{rec}#{meta.get('chunk', '0')}" if rec else ""
+
+
 def _meta_matches(meta: dict, types: set[str] | None, addressee: str | None,
                   year_from: int | None, year_to: int | None,
                   volume: str | None) -> bool:
@@ -235,6 +244,7 @@ class Retriever:
                 "text": c["text"],
                 "source": c["source"],
                 "meta": c["meta"],
+                "chunk_id": chunk_id(c["meta"]),
                 "score": float(scores[i]),
             })
         return results
@@ -278,12 +288,15 @@ class Retriever:
              types: set[str] | None = None, addressee: str | None = None,
              year_from: int | None = None, year_to: int | None = None,
              volume: str | None = None, limit: int = 20,
-             offset: int = 0) -> dict:
+             offset: int = 0, full: bool = False) -> dict:
         """Точный поиск слова/фразы по текстам чанков (без эмбеддинга).
 
         Возвращает суммарное число вхождений по всем подходящим чанкам и до
-        limit чанков (начиная с offset-го совпадения) с контекстом ±150
-        символов вокруг первого вхождения.
+        limit чанков (начиная с offset-го совпадения). full=True — текст чанка
+        целиком, иначе контекст ±150 символов вокруг первого вхождения
+        (snippet_start — смещение сниппета в чанке). У каждого результата
+        chunk_id (постоянный id чанка) и spans — [start, end] всех вхождений
+        относительно ПОЛНОГО текста чанка.
         Фильтры дают частотность: «сколько раз слово X встречается в письмах
         Черткову за 1890-е». Регистронезависимый; whole_word=True — границы
         слова (юникодные \\b, работает с кириллицей).
@@ -298,23 +311,29 @@ class Retriever:
         for c in self.chunks:
             if not _meta_matches(c["meta"], types, addressee, year_from, year_to, volume):
                 continue
-            m = rx.search(c["text"])
-            if m is None:
+            text = c["text"]
+            spans = [[m.start(), m.end()] for m in rx.finditer(text)]
+            if not spans:
                 continue
             chunks_matched += 1
-            total_matches += len(rx.findall(c["text"]))
+            total_matches += len(spans)
             if chunks_matched > offset and len(results) < limit:
-                text = c["text"]
-                start = max(0, m.start() - 150)
-                end = min(len(text), m.end() + 150)
-                snippet = ("…" if start > 0 else "") + text[start:end] + \
-                          ("…" if end < len(text) else "")
-                results.append({
-                    "text": snippet,
+                item = {
                     "source": c["source"],
                     "meta": c["meta"],
-                    "matches": len(rx.findall(text)),
-                })
+                    "chunk_id": chunk_id(c["meta"]),
+                    "matches": len(spans),
+                    "spans": spans,
+                }
+                if full:
+                    item["text"] = text
+                else:
+                    start = max(0, spans[0][0] - 150)
+                    end = min(len(text), spans[0][1] + 150)
+                    item["text"] = ("…" if start > 0 else "") + text[start:end] + \
+                                   ("…" if end < len(text) else "")
+                    item["snippet_start"] = start
+                results.append(item)
         return {
             "count": total_matches,
             "chunks_matched": chunks_matched,

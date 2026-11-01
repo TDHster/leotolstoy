@@ -325,8 +325,8 @@ async def tolstoy_search(
 ) -> dict:
     """Семантический поиск по корпусу Толстого БЕЗ вызова LLM.
 
-    Возвращает фрагменты, ближайшие по смыслу: текст, ссылку на источник,
-    скор и полные метаданные (тип, дата, возраст, том, адресат, № письма…).
+    Возвращает фрагменты (чанки целиком), ближайшие по смыслу: текст, ссылку
+    на источник, скор, chunk_id (постоянный id чанка) и полные метаданные (тип, дата, возраст, том, адресат, № письма…).
     Дёшев и быстр — основной инструмент для фактов и цитат. Полный текст
     записи — tolstoy_doc(doc из meta результата)."""
     types_set = _type_filter(types)
@@ -353,6 +353,7 @@ async def tolstoy_search(
             "text": r["text"],
             "source": r["source"],
             "score": round(r["score"], 3),
+            "chunk_id": r.get("chunk_id", ""),
             "meta": r["meta"],
         } for r in results],
     }
@@ -431,12 +432,16 @@ async def tolstoy_grep(
     volume: Annotated[int | None, Field(default=None, ge=1, le=90, description="Том ПСС-90 (1-90)")] = None,
     limit: Annotated[int, Field(default=20, ge=1, le=50, description="Сколько чанков с контекстом вернуть (1-50)")] = 20,
     offset: Annotated[int, Field(default=0, ge=0, description="Сдвиг для пагинации (по совпавшим чанкам)")] = 0,
+    full: Annotated[bool, Field(default=False, description="True — вернуть чанк (абзац) целиком вместо контекста ±150 символов")] = False,
 ) -> dict:
     """Точный поиск слова/фразы по текстам чанков, БЕЗ вызова LLM.
 
     Регистронезависимый. Возвращает суммарное число вхождений по корпусу
-    (с учётом фильтров), число задетых чанков и до limit фрагментов с контекстом
-    ±150 символов вокруг первого вхождения. Если chunks_matched больше
+    (с учётом фильтров), число задетых чанков и до limit фрагментов: с full=True —
+    чанк (абзац) целиком, иначе контекст ±150 символов вокруг первого вхождения
+    (snippet_start — смещение сниппета в чанке). Для цитирования бери full=True.
+    У каждого фрагмента chunk_id — постоянный id чанка («id записи#номер чанка»)
+    и spans — [start, end] ВСЕХ вхождений в полном тексте чанка. Если chunks_matched больше
     offset + limit — листай дальше, увеличивая offset. Фильтры дают частотность:
     «сколько раз „смерть“ встречается в письмах Черткову за 1890-е».
     Орфография корпуса нормализована (ё/ъ) — если слово не нашлось,
@@ -452,7 +457,7 @@ async def tolstoy_grep(
             retriever.grep,
             pattern, whole_word, types_set, addressee, year_from, year_to,
             str(volume) if volume is not None else None,
-            limit, offset,
+            limit, offset, full,
         )
     except HTTPException as e:
         raise ValueError(str(e.detail)) from e

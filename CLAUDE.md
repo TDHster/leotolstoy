@@ -137,7 +137,7 @@ MCP-сервер (streamable HTTP, FastMCP 3.x) встроен в FastAPI — и
 | `tolstoy_browse` | список ЗАПИСЕЙ по метаданным, по дате, с превью и пагинацией |
 | `tolstoy_facets` | словарь значений фильтров: типы, годы, топ-100 адресатов, тома (кешируется в Retriever) |
 | `tolstoy_doc` | полный текст записи + метаданные по doc_id (index/docs.json) |
-| `tolstoy_grep` | точный поиск слова/фразы по чанкам (регэксп, IGNORECASE, `whole_word` — `\b`), контекст ±150, счётчики вхождений, пагинация `offset` (limit ≤ 50) |
+| `tolstoy_grep` | точный поиск слова/фразы по чанкам (регэксп, IGNORECASE, `whole_word` — `\b`), контекст ±150 или чанк целиком (`full=True`), `chunk_id` + `spans` всех вхождений, счётчики, пагинация `offset` (limit ≤ 50) |
 
 - Auth: Bearer `MCP_API_KEY` — проверяется ASGI-мидлварью `_MCPTokenAuth`
   (FastAPI `Depends` на mount не работают). Пусто = /mcp не смонтирован.
@@ -235,6 +235,12 @@ Docker (на сервере): `docker compose up -d --build`, `logs -f`, `restar
   `data/verbatis/…`). На сервере их нет: tom*.txt удалил rsync `--delete`, tei_*.txt
   снесены вручную (rsync исключённые не удаляет). Не запускать legacy-конвертеры —
   их выход ничего не изменит, но создаст мусорные файлы.
+- **`chunk_id` = `meta.id#meta.chunk`** (id записи Verbatis + номер чанка в
+  записи; отдают `tolstoy_grep`/`tolstoy_search`) — постоянный, в отличие от
+  `doc` (сквозной счётчик). Стабилен, пока не меняются текст записи в Verbatis
+  и параметры чанкинга (`CHUNK_CHARS`, `MIN_CHARS`, фильтр подписей) — после
+  такой смены номера чанков внутри записи сдвигаются. `spans` в grep — позиции
+  в ПОЛНОМ тексте чанка (и в режиме сниппета; смещение — `snippet_start`).
 - **Поле `text` не должно попадать в meta чанка** — `_verbatis_meta` его
   вырезает; иначе полный текст записи дублировался бы в каждый чанк и раздул
   chunks.json на десятки МБ.
